@@ -1,0 +1,8 @@
+# Local-only overrides, never committed
+dashboard/local_*.py
+scripts/preview/fixture.json
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+.DS_Store

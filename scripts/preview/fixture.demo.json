@@ -1,0 +1,647 @@
+{
+ "now": 1794500400.0,
+ "quota": {
+  "generated_at": 1794500388.0,
+  "providers": {
+   "anthropic": {
+    "id": "anthropic",
+    "name": "Anthropic",
+    "status": "ok",
+    "plan": "Max",
+    "source": "hermes",
+    "windows": [
+     {
+      "id": "5h",
+      "label": "5h",
+      "used_percent": 38,
+      "remaining_percent": 62,
+      "resets_at": 1794508440.0,
+      "detail": null,
+      "scope": "account"
+     },
+     {
+      "id": "week",
+      "label": "Week",
+      "used_percent": 71,
+      "remaining_percent": 29,
+      "resets_at": 1794777600.0,
+      "detail": null,
+      "scope": "account"
+     }
+    ],
+    "details": [],
+    "message": null,
+    "fetched_at": 1794500388.0,
+    "stale": false,
+    "error": null,
+    "warning": {
+     "label": "Near limit",
+     "level": "warn",
+     "detail": "Anthropic flags the weekly window as close to its limit"
+    }
+   },
+   "commandcode": {
+    "id": "commandcode",
+    "name": "Command Code",
+    "status": "ok",
+    "plan": "Pro",
+    "source": "api",
+    "windows": [
+     {
+      "id": "5h",
+      "label": "5h",
+      "used_percent": 9,
+      "remaining_percent": 91,
+      "resets_at": 1794514920.0,
+      "detail": "$2.70 of $30.00 used",
+      "scope": "account"
+     },
+     {
+      "id": "week",
+      "label": "Week",
+      "used_percent": 46,
+      "remaining_percent": 54,
+      "resets_at": 1794932400.0,
+      "detail": "$34.50 of $75.00 used",
+      "scope": "account"
+     },
+     {
+      "id": "cycle",
+      "label": "Cycle",
+      "used_percent": 88,
+      "remaining_percent": 12,
+      "resets_at": 1795969200.0,
+      "detail": "$9.60 of $80.00 credits left",
+      "scope": "account"
+     }
+    ],
+    "details": [],
+    "message": null,
+    "fetched_at": 1794500388.0,
+    "stale": false,
+    "error": null,
+    "warning": null
+   },
+   "xai": {
+    "id": "xai",
+    "name": "xAI",
+    "status": "ok",
+    "plan": null,
+    "source": "hermes",
+    "windows": [
+     {
+      "id": "week",
+      "label": "Week",
+      "used_percent": 22,
+      "remaining_percent": 78,
+      "resets_at": 1795029600.0,
+      "detail": null,
+      "scope": "account"
+     }
+    ],
+    "details": [],
+    "message": null,
+    "fetched_at": 1794500388.0,
+    "stale": false,
+    "error": null,
+    "warning": null
+   }
+  }
+ },
+ "usage": {
+  "generated_at": 1794500388.0,
+  "tz": "UTC",
+  "tracking_since": 1791936000.0,
+  "series": {
+   "today": {
+    "unit": "hour",
+    "bars": [
+     {
+      "start": 1794441600,
+      "end": 1794445200,
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+     },
+     {
+      "start": 1794445200,
+      "end": 1794448800,
+      "input": 20617,
+      "output": 6185,
+      "cache_read": 453586,
+      "cache_write": 36080
+     },
+     {
+      "start": 1794448800,
+      "end": 1794452400,
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+     },
+     {
+      "start": 1794452400,
+      "end": 1794456000,
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+     },
+     {
+      "start": 1794456000,
+      "end": 1794459600,
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+     },
+     {
+      "start": 1794459600,
+      "end": 1794463200,
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+     },
+     {
+      "start": 1794463200,
+      "end": 1794466800,
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+     },
+     {
+      "start": 1794466800,
+      "end": 1794470400,
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+     },
+     {
+      "start": 1794470400,
+      "end": 1794474000,
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+     },
+     {
+      "start": 1794474000,
+      "end": 1794477600,
+      "input": 41511,
+      "output": 12453,
+      "cache_read": 913244,
+      "cache_write": 72644
+     },
+     {
+      "start": 1794477600,
+      "end": 1794481200,
+      "input": 107591,
+      "output": 32277,
+      "cache_read": 2367018,
+      "cache_write": 188285
+     },
+     {
+      "start": 1794481200,
+      "end": 1794484800,
+      "input": 82112,
+      "output": 24633,
+      "cache_read": 1806464,
+      "cache_write": 143696
+     },
+     {
+      "start": 1794484800,
+      "end": 1794488400,
+      "input": 49377,
+      "output": 14813,
+      "cache_read": 1086312,
+      "cache_write": 86411
+     },
+     {
+      "start": 1794488400,
+      "end": 1794492000,
+      "input": 34273,
+      "output": 10282,
+      "cache_read": 754027,
+      "cache_write": 59979
+     },
+     {
+      "start": 1794492000,
+      "end": 1794495600,
+      "input": 68259,
+      "output": 20477,
+      "cache_read": 1501713,
+      "cache_write": 119454
+     },
+     {
+      "start": 1794495600,
+      "end": 1794499200,
+      "input": 144856,
+      "output": 43456,
+      "cache_read": 3186844,
+      "cache_write": 253498
+     },
+     {
+      "start": 1794499200,
+      "end": 1794502800,
+      "input": 54431,
+      "output": 16329,
+      "cache_read": 1197496,
+      "cache_write": 95255
+     },
+     {
+      "start": 1794502800,
+      "end": 1794506400,
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+     },
+     {
+      "start": 1794506400,
+      "end": 1794510000,
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+     },
+     {
+      "start": 1794510000,
+      "end": 1794513600,
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+     },
+     {
+      "start": 1794513600,
+      "end": 1794517200,
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+     },
+     {
+      "start": 1794517200,
+      "end": 1794520800,
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+     },
+     {
+      "start": 1794520800,
+      "end": 1794524400,
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+     },
+     {
+      "start": 1794524400,
+      "end": 1794528000,
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+     }
+    ]
+   },
+   "7d": {
+    "unit": "day",
+    "bars": [
+     {
+      "start": 1793923200,
+      "end": 1794009600,
+      "input": 340889,
+      "output": 102266,
+      "cache_read": 7499578,
+      "cache_write": 596557
+     },
+     {
+      "start": 1794009600,
+      "end": 1794096000,
+      "input": 367295,
+      "output": 110188,
+      "cache_read": 8080494,
+      "cache_write": 642766
+     },
+     {
+      "start": 1794096000,
+      "end": 1794182400,
+      "input": 107611,
+      "output": 32283,
+      "cache_read": 2367447,
+      "cache_write": 188319
+     },
+     {
+      "start": 1794182400,
+      "end": 1794268800,
+      "input": 75169,
+      "output": 22550,
+      "cache_read": 1653722,
+      "cache_write": 131546
+     },
+     {
+      "start": 1794268800,
+      "end": 1794355200,
+      "input": 807348,
+      "output": 242204,
+      "cache_read": 17761662,
+      "cache_write": 1412859
+     },
+     {
+      "start": 1794355200,
+      "end": 1794441600,
+      "input": 335539,
+      "output": 100661,
+      "cache_read": 7381878,
+      "cache_write": 587194
+     },
+     {
+      "start": 1794441600,
+      "end": 1794528000,
+      "input": 603027,
+      "output": 180905,
+      "cache_read": 13266704,
+      "cache_write": 1055302
+     }
+    ]
+   },
+   "all": {
+    "unit": "day",
+    "bars": [
+     {
+      "start": 1791936000,
+      "end": 1792022400,
+      "input": 264467,
+      "output": 79340,
+      "cache_read": 5818277,
+      "cache_write": 462817
+     },
+     {
+      "start": 1792022400,
+      "end": 1792108800,
+      "input": 342258,
+      "output": 102677,
+      "cache_read": 7529678,
+      "cache_write": 598951
+     },
+     {
+      "start": 1792108800,
+      "end": 1792195200,
+      "input": 280284,
+      "output": 84085,
+      "cache_read": 6166250,
+      "cache_write": 490497
+     },
+     {
+      "start": 1792195200,
+      "end": 1792281600,
+      "input": 63296,
+      "output": 18989,
+      "cache_read": 1392528,
+      "cache_write": 110769
+     },
+     {
+      "start": 1792281600,
+      "end": 1792368000,
+      "input": 99432,
+      "output": 29829,
+      "cache_read": 2187510,
+      "cache_write": 174006
+     },
+     {
+      "start": 1792368000,
+      "end": 1792454400,
+      "input": 191179,
+      "output": 57353,
+      "cache_read": 4205956,
+      "cache_write": 334564
+     },
+     {
+      "start": 1792454400,
+      "end": 1792540800,
+      "input": 401473,
+      "output": 120442,
+      "cache_read": 8832421,
+      "cache_write": 702579
+     },
+     {
+      "start": 1792540800,
+      "end": 1792627200,
+      "input": 269466,
+      "output": 80840,
+      "cache_read": 5928267,
+      "cache_write": 471566
+     },
+     {
+      "start": 1792627200,
+      "end": 1792713600,
+      "input": 240375,
+      "output": 72112,
+      "cache_read": 5288266,
+      "cache_write": 420657
+     },
+     {
+      "start": 1792713600,
+      "end": 1792800000,
+      "input": 241593,
+      "output": 72477,
+      "cache_read": 5315053,
+      "cache_write": 422788
+     },
+     {
+      "start": 1792800000,
+      "end": 1792886400,
+      "input": 76210,
+      "output": 22863,
+      "cache_read": 1676634,
+      "cache_write": 133368
+     },
+     {
+      "start": 1792886400,
+      "end": 1792972800,
+      "input": 116519,
+      "output": 34955,
+      "cache_read": 2563435,
+      "cache_write": 203909
+     },
+     {
+      "start": 1792972800,
+      "end": 1793059200,
+      "input": 285919,
+      "output": 85775,
+      "cache_read": 6290220,
+      "cache_write": 500358
+     },
+     {
+      "start": 1793059200,
+      "end": 1793145600,
+      "input": 421850,
+      "output": 126555,
+      "cache_read": 9280720,
+      "cache_write": 738239
+     },
+     {
+      "start": 1793145600,
+      "end": 1793232000,
+      "input": 453341,
+      "output": 136002,
+      "cache_read": 9973509,
+      "cache_write": 793347
+     },
+     {
+      "start": 1793232000,
+      "end": 1793318400,
+      "input": 377125,
+      "output": 113137,
+      "cache_read": 8296762,
+      "cache_write": 659969
+     },
+     {
+      "start": 1793318400,
+      "end": 1793404800,
+      "input": 448500,
+      "output": 134550,
+      "cache_read": 9867010,
+      "cache_write": 784875
+     },
+     {
+      "start": 1793404800,
+      "end": 1793491200,
+      "input": 72175,
+      "output": 21652,
+      "cache_read": 1587864,
+      "cache_write": 126307
+     },
+     {
+      "start": 1793491200,
+      "end": 1793577600,
+      "input": 73835,
+      "output": 22150,
+      "cache_read": 1624383,
+      "cache_write": 129212
+     },
+     {
+      "start": 1793577600,
+      "end": 1793664000,
+      "input": 357910,
+      "output": 107373,
+      "cache_read": 7874040,
+      "cache_write": 626344
+     },
+     {
+      "start": 1793664000,
+      "end": 1793750400,
+      "input": 549273,
+      "output": 164782,
+      "cache_read": 12084018,
+      "cache_write": 961228
+     },
+     {
+      "start": 1793750400,
+      "end": 1793836800,
+      "input": 463500,
+      "output": 139050,
+      "cache_read": 10197007,
+      "cache_write": 811125
+     },
+     {
+      "start": 1793836800,
+      "end": 1793923200,
+      "input": 429064,
+      "output": 128719,
+      "cache_read": 9439410,
+      "cache_write": 750862
+     },
+     {
+      "start": 1793923200,
+      "end": 1794009600,
+      "input": 340889,
+      "output": 102266,
+      "cache_read": 7499578,
+      "cache_write": 596557
+     },
+     {
+      "start": 1794009600,
+      "end": 1794096000,
+      "input": 367295,
+      "output": 110188,
+      "cache_read": 8080494,
+      "cache_write": 642766
+     },
+     {
+      "start": 1794096000,
+      "end": 1794182400,
+      "input": 107611,
+      "output": 32283,
+      "cache_read": 2367447,
+      "cache_write": 188319
+     },
+     {
+      "start": 1794182400,
+      "end": 1794268800,
+      "input": 75169,
+      "output": 22550,
+      "cache_read": 1653722,
+      "cache_write": 131546
+     },
+     {
+      "start": 1794268800,
+      "end": 1794355200,
+      "input": 807348,
+      "output": 242204,
+      "cache_read": 17761662,
+      "cache_write": 1412859
+     },
+     {
+      "start": 1794355200,
+      "end": 1794441600,
+      "input": 335539,
+      "output": 100661,
+      "cache_read": 7381878,
+      "cache_write": 587194
+     },
+     {
+      "start": 1794441600,
+      "end": 1794528000,
+      "input": 603027,
+      "output": 180905,
+      "cache_read": 13266704,
+      "cache_write": 1055302
+     }
+    ]
+   }
+  },
+  "providers": {
+   "anthropic": {
+    "input": 8575444,
+    "output": 2572633,
+    "cache_read": 188659785,
+    "cache_write": 15007028,
+    "total": 214814890,
+    "first_at": 1791936000.0
+   },
+   "commandcode": {
+    "input": 50876182,
+    "output": 15262854,
+    "cache_read": 1119276006,
+    "cache_write": 89033318,
+    "total": 1274448360,
+    "first_at": 1791936000.0
+   },
+   "xai": {
+    "input": 1552816,
+    "output": 465845,
+    "cache_read": 34161966,
+    "cache_write": 2717429,
+    "total": 38898056,
+    "first_at": 1791936000.0
+   }
+  }
+ }
+}

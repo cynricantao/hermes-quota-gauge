@@ -1,0 +1,15 @@
+name: quota-gauge
+version: "0.1.0"
+description: "Desktop pane with draining quota bars for Anthropic, Command Code and xAI, plus daily token charts (input, output, cache read, cache write) built from this profile's own usage records. No telemetry."
+author: cynricantao
+license: MIT
+homepage: https://github.com/cynricantao/hermes-quota-gauge
+tags: [desktop, usage, quota, tokens, anthropic, xai, commandcode]
+requires_hermes: ">=0.22.0"
+config_schema:
+  commandcode_api_key:
+    type: secret
+    env: COMMANDCODE_API_KEY
+    required: false
+    label: "Command Code API key"
+    description: "Reads your Command Code 5-hour, weekly and cycle windows. Uses the same key as the Command Code provider."
