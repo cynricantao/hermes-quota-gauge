@@ -22,7 +22,7 @@ const ctx = {
     if (path.startsWith('/usage')) return fixture.usage
     throw new Error('HTTP 404 Not Found')
   },
-  storage: { get: (k, d) => (k === 'range' && params.get('range')) || d, set() {}, remove() {} },
+  storage: { get: (k, d) => (k === 'range' && params.get('range')) || (k === 'hiddenOpen' && params.get('hidden') === '1') || d, set() {}, remove() {} },
   onDispose() {},
   setTimeout: (fn, ms) => { const t = setTimeout(fn, ms); return () => clearTimeout(t) }
 }

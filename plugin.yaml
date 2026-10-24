@@ -1,10 +1,10 @@
 name: quota-gauge
-version: "0.1.0"
-description: "Desktop pane with draining quota bars for Anthropic, Command Code and xAI, plus daily token charts (input, output, cache read, cache write) built from this profile's own usage records. No telemetry."
+version: "0.2.0"
+description: "Desktop pane with draining quota bars for the AI subscriptions this profile is signed in to (Anthropic, ChatGPT/Codex, Command Code, xAI, OpenCode Go, GitHub Copilot, Nous Portal, Z.ai, Kimi Code, MiniMax, Devin, Antigravity), with the rest filed under Hidden/Inactive, plus daily token charts (input, output, cache read, cache write) built from this profile's own usage records. No telemetry."
 author: cynricantao
 license: MIT
 homepage: https://github.com/cynricantao/hermes-quota-gauge
-tags: [desktop, usage, quota, tokens, anthropic, xai, commandcode]
+tags: [desktop, usage, quota, tokens, anthropic, openai, codex, xai, commandcode, copilot, opencode, zai, kimi, minimax]
 requires_hermes: ">=0.22.0"
 config_schema:
   commandcode_api_key:
@@ -13,3 +13,39 @@ config_schema:
     required: false
     label: "Command Code API key"
     description: "Reads your Command Code 5-hour, weekly and cycle windows. Uses the same key as the Command Code provider."
+  opencode_go_api_key:
+    type: secret
+    env: OPENCODE_GO_API_KEY
+    required: false
+    label: "OpenCode Go API key"
+    description: "Turns on the OpenCode Go card. Same key as the OpenCode Go provider; usage is read through Hermes."
+  copilot_github_token:
+    type: secret
+    env: COPILOT_GITHUB_TOKEN
+    required: false
+    label: "GitHub Copilot token"
+    description: "A GitHub OAuth token (gho_) or fine-grained PAT with Copilot access. Reads premium-request and chat quota from api.github.com."
+  zai_api_key:
+    type: secret
+    env: ZAI_API_KEY
+    required: false
+    label: "Z.ai API key"
+    description: "Your GLM Coding Plan key (GLM_API_KEY and Z_AI_API_KEY are read too). Reads the 5-hour, weekly and MCP windows from api.z.ai."
+  kimi_api_key:
+    type: secret
+    env: KIMI_API_KEY
+    required: false
+    label: "Kimi Code API key"
+    description: "Your Kimi Code key (KIMI_CODING_API_KEY is read too). Reads the 5-hour and weekly windows from api.kimi.com."
+  minimax_api_key:
+    type: secret
+    env: MINIMAX_API_KEY
+    required: false
+    label: "MiniMax Coding Plan key"
+    description: "Your MiniMax Coding Plan key (MINIMAX_CN_API_KEY selects the China host). Reads the prompt windows from api.minimax.io."
+  devin_api_key:
+    type: secret
+    env: DEVIN_API_KEY
+    required: false
+    label: "Devin API key"
+    description: "Turns on the Devin card. Devin publishes consumption only to Enterprise admins, so no request is made with it."

@@ -29,5 +29,6 @@ shot quota-gauge-light ""
 shot quota-gauge-dark "dark=1"
 shot quota-gauge-hover "dark=1&hover=15"
 shot quota-gauge-7d "dark=1&range=7d&hover=4"
+shot quota-gauge-hidden "dark=1&hidden=1"
 rm -rf "$work"
 ls -1 "$out"/quota-gauge-*.png

@@ -1,12 +1,18 @@
 """Quota Gauge backend, mounted at ``/api/plugins/quota-gauge/``.
 
-GET /quota            subscription windows for Anthropic, Command Code and xAI (cached per provider)
+GET /quota            subscription windows for every provider card (cached per provider)
 GET /usage?tz=<IANA>  token history read from this profile's ``state.db`` into a monotonic local ledger
-GET /health           version and which optional sources are present
+GET /health           version and which providers this profile holds a credential for
 
-Credentials never come from files here. Anthropic and xAI go through Hermes's own account-usage
-route (``agent.account_usage.fetch_account_usage``); Command Code uses the ``COMMANDCODE_API_KEY``
-secret through ``agent.secret_scope.get_secret``.
+A card is *live* only when this profile holds a credential for it and the provider reports a paid
+plan; every other card is ``inactive`` (no credential found) or ``no_subscription`` and the pane
+files it under *Hidden/Inactive*. Detection never reads a file: it asks Hermes's credential pool
+(``agent.credential_pool``) whether a provider has a sign-in or key, and checks the plugin's declared
+secrets through ``agent.secret_scope.get_secret``. Inactive cards make no network request.
+
+Usage numbers come from Hermes's own account-usage route (``agent.account_usage``) where it has one
+(Anthropic, Codex, OpenCode Go, Nous Portal) and otherwise from the provider's usage endpoint with
+the user's declared key (Command Code, Z.ai, Kimi Code, MiniMax, GitHub Copilot).
 """
 
 from __future__ import annotations
@@ -21,7 +27,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, NamedTuple, Optional
 
 from fastapi import APIRouter
 
@@ -29,21 +35,67 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 PLUGIN_ID = "quota-gauge"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 USER_AGENT = f"hermes-quota-gauge/{VERSION}"
 
 KINDS = ("input", "output", "cache_read", "cache_write")
-PROVIDERS = ("anthropic", "commandcode", "xai")
-PROVIDER_NAMES = {"anthropic": "Anthropic", "commandcode": "Command Code", "xai": "xAI"}
 
 BUCKET_S = 900                 # ledger resolution: 15 minutes (aligns with every UTC offset)
 MAX_SPREAD_BUCKETS = 96 * 120  # a single delta is never spread over more than ~120 days
 LONG_GAP_S = 1800              # growth across a longer gap is booked at the latest activity
 SYNC_MIN_INTERVAL_S = 15       # /usage re-reads state.db at most this often
 BACKGROUND_SYNC_S = 60         # while the backend runs, the ledger keeps up without the pane open
-QUOTA_TTL_S = {"anthropic": 300, "commandcode": 120, "xai": 120}
 FORCE_MIN_INTERVAL_S = 30      # a manual refresh can't hammer a provider
 FETCH_DEADLINE_S = 20.0
+DETECT_TTL_S = 60              # credential detection is re-checked at most this often
+HIDDEN_STATUSES = frozenset({"inactive", "no_subscription"})
+
+
+class ProviderSpec(NamedTuple):
+    """One card. ``hermes`` lists Hermes provider slugs whose credential means "signed in";
+    ``secrets`` lists env secrets (declared in plugin.yaml) that count too, first match wins.
+    A NamedTuple rather than a dataclass: Hermes may load this file without registering it in
+    ``sys.modules``, and dataclasses need that."""
+
+    id: str
+    name: str
+    hermes: tuple[str, ...] = ()
+    secrets: tuple[str, ...] = ()
+    ttl: int = 180
+    setup: str = ""  # what turns the card on, shown in Hidden/Inactive
+
+
+SPECS: dict[str, ProviderSpec] = {s.id: s for s in (
+    ProviderSpec("anthropic", "Anthropic", hermes=("anthropic",), ttl=300,
+                 setup="No Claude sign-in in Hermes. Run `hermes auth add anthropic`."),
+    ProviderSpec("codex", "ChatGPT / Codex", hermes=("openai-codex",), ttl=180,
+                 setup="No ChatGPT sign-in in Hermes. Run `hermes auth add openai-codex`."),
+    ProviderSpec("commandcode", "Command Code", hermes=("commandcode",), secrets=("COMMANDCODE_API_KEY",), ttl=120,
+                 setup="No Command Code key. Add COMMANDCODE_API_KEY in Settings → Plugins → Quota Gauge."),
+    ProviderSpec("xai", "xAI", hermes=("xai-oauth",), ttl=120,
+                 setup="No Grok sign-in in Hermes. Run `hermes auth add xai-oauth` (an xAI API key has no subscription)."),
+    ProviderSpec("antigravity", "Antigravity", ttl=300,
+                 setup="Hermes has no Google AI / Antigravity sign-in, so there's nothing to read yet."),
+    ProviderSpec("opencode", "OpenCode Go", hermes=("opencode-go",), secrets=("OPENCODE_GO_API_KEY",), ttl=180,
+                 setup="No OpenCode Go key. Add OPENCODE_GO_API_KEY (Zen keys are pay-as-you-go)."),
+    ProviderSpec("devin", "Devin", secrets=("DEVIN_API_KEY",), ttl=600,
+                 setup="No Devin key. Add DEVIN_API_KEY in Settings → Plugins → Quota Gauge."),
+    ProviderSpec("copilot", "GitHub Copilot", hermes=("copilot",), secrets=("COPILOT_GITHUB_TOKEN",), ttl=300,
+                 setup="No Copilot sign-in in Hermes. Run `hermes model` and pick GitHub Copilot."),
+    ProviderSpec("nous", "Nous Portal", hermes=("nous",), ttl=300,
+                 setup="No Nous Portal sign-in in Hermes. Run `hermes auth add nous`."),
+    ProviderSpec("zai", "Z.ai GLM", hermes=("zai",), secrets=("ZAI_API_KEY", "GLM_API_KEY", "Z_AI_API_KEY"), ttl=180,
+                 setup="No Z.ai key. Add ZAI_API_KEY (the GLM Coding Plan key)."),
+    ProviderSpec("kimi", "Kimi Code", hermes=("kimi-coding",), secrets=("KIMI_API_KEY", "KIMI_CODING_API_KEY"), ttl=180,
+                 setup="No Kimi Code key. Add KIMI_API_KEY from the Kimi Code console."),
+    ProviderSpec("minimax", "MiniMax", hermes=("minimax", "minimax-cn", "minimax-oauth"),
+                 secrets=("MINIMAX_API_KEY", "MINIMAX_CN_API_KEY"), ttl=180,
+                 setup="No MiniMax key. Add MINIMAX_API_KEY (the Coding Plan key)."),
+)}
+PROVIDERS = tuple(SPECS)
+PROVIDER_NAMES = {pid: spec.name for pid, spec in SPECS.items()}
+QUOTA_TTL_S = {pid: spec.ttl for pid, spec in SPECS.items()}
+
 
 
 # ---------------------------------------------------------------------------------------------
@@ -162,12 +214,75 @@ def _retry_after(value: Any) -> Optional[float]:
 
 
 # ---------------------------------------------------------------------------------------------
-# Provider fetchers. Each returns a normalized dict and may raise ProviderHTTPError.
+# Detection: does this profile hold a credential for a card? (no file reads, no network)
 # ---------------------------------------------------------------------------------------------
 
-_ANTHROPIC_LABELS = {
+def _pool_has(slug: str) -> bool:
+    """Hermes's credential pool for ``slug`` holds a sign-in or key (env keys and OAuth logins both
+    land there)."""
+    try:
+        from agent.credential_pool import load_pool
+
+        return bool(load_pool(slug).has_credentials())
+    except Exception as exc:
+        log.debug("quota-gauge: credential pool for %s unreadable: %s", slug, exc)
+        return False
+
+
+def detect(pid: str) -> Optional[str]:
+    """Where this profile keeps a credential for ``pid``: ``"secret:NAME"``, ``"hermes:slug"`` or None."""
+    spec = SPECS[pid]
+    for name in spec.secrets:
+        if _secret(name):
+            return f"secret:{name}"
+    for slug in spec.hermes:
+        if _pool_has(slug):
+            return f"hermes:{slug}"
+    return None
+
+
+_detect_cache: dict[tuple[str, str], tuple[float, Optional[str]]] = {}
+
+
+def _detect_cached(home_key: str, pid: str, force: bool = False) -> Optional[str]:
+    now = time.monotonic()
+    hit = _detect_cache.get((home_key, pid))
+    if hit and not force and now - hit[0] < DETECT_TTL_S:
+        return hit[1]
+    via = detect(pid)
+    _detect_cache[(home_key, pid)] = (now, via)
+    return via
+
+
+def _first_secret(pid: str) -> tuple[Optional[str], Optional[str]]:
+    """(value, env name) of the first declared secret that is set for ``pid``."""
+    for name in SPECS[pid].secrets:
+        value = _secret(name)
+        if value:
+            return value, name
+    return None, None
+
+
+# ---------------------------------------------------------------------------------------------
+# Normalized results
+# ---------------------------------------------------------------------------------------------
+
+def _inactive(pid: str, message: Optional[str] = None) -> dict:
+    return _unavailable(pid, message or SPECS[pid].setup, code="inactive")
+
+
+def _no_subscription(pid: str, message: str) -> dict:
+    return _unavailable(pid, message, code="no_subscription")
+
+
+_WINDOW_LABELS = {
     "current session": ("5h", "5h"),
+    "session": ("5h", "5h"),
+    "rolling window": ("5h", "5h"),
     "current week": ("week", "Week"),
+    "weekly": ("week", "Week"),
+    "monthly": ("month", "Month"),
+    "subscription": ("plan", "Plan"),
     "opus week": ("opus_week", "Opus wk"),
     "sonnet week": ("sonnet_week", "Sonnet wk"),
 }
@@ -180,7 +295,7 @@ def _from_core_snapshot(pid: str, snapshot: Any, source: str = "hermes") -> Opti
     windows = []
     for w in getattr(snapshot, "windows", ()) or ():
         label = str(getattr(w, "label", "") or "")
-        wid, short = _ANTHROPIC_LABELS.get(label.lower(), (label.lower().replace(" ", "_") or "window", label))
+        wid, short = _WINDOW_LABELS.get(label.lower(), (label.lower().replace(" ", "_") or "window", label))
         windows.append(_window(wid, short, getattr(w, "used_percent", None), getattr(w, "reset_at", None),
                                getattr(w, "detail", None), getattr(w, "scope", "account") or "account"))
     windows = [w for w in windows if w]
@@ -193,28 +308,72 @@ def _from_core_snapshot(pid: str, snapshot: Any, source: str = "hermes") -> Opti
 _core_skip_until: dict[str, float] = {}
 
 
-def _core_usage(provider_slug: str) -> Optional[dict]:
-    """Hermes's own account-usage route. A miss is remembered for a while so a provider that
-    can't answer (e.g. a token without the usage scope) isn't asked on every poll."""
+def _core_snapshot(provider_slug: str) -> Any:
+    """``fetch_account_usage`` from Hermes core (read-only: never refreshes or rotates a
+    credential). A miss is remembered for 10 minutes so a provider that can't answer isn't asked on
+    every poll."""
     now = time.time()
     if _core_skip_until.get(provider_slug, 0) > now:
         return None
     try:
         from agent.account_usage import fetch_account_usage
 
-        snapshot = fetch_account_usage(provider_slug)
+        snapshot = fetch_account_usage(provider_slug, read_only=True)
     except Exception as exc:
         log.debug("quota-gauge: core usage for %s failed: %s", provider_slug, exc)
         snapshot = None
-    pid = "xai" if provider_slug.startswith("xai") else provider_slug
-    result = _from_core_snapshot(pid, snapshot)
-    if result is None:
-        _core_skip_until[provider_slug] = now + 1800
-    return result
+    if snapshot is None:
+        _core_skip_until[provider_slug] = now + 600
+    return snapshot
 
+
+def _plan_is_free(plan: Any) -> bool:
+    return str(plan or "").strip().lower() in ("free", "guest", "none", "free_limited_copilot")
+
+
+def _span_label(minutes: Optional[float]) -> tuple[str, str]:
+    """Window id and short label for a window length in minutes."""
+    if not minutes or minutes <= 0:
+        return "window", "Window"
+    if abs(minutes - 300) <= 1:
+        return "5h", "5h"
+    if abs(minutes - 1440) <= 1:
+        return "day", "Day"
+    if abs(minutes - 10080) <= 1:
+        return "week", "Week"
+    if 40000 <= minutes <= 46000:
+        return "month", "Month"
+    if minutes % 1440 == 0:
+        return f"{int(minutes // 1440)}d", f"{int(minutes // 1440)}d"
+    if minutes % 60 == 0:
+        return f"{int(minutes // 60)}h", f"{int(minutes // 60)}h"
+    return f"{int(minutes)}m", f"{int(minutes)}m"
+
+
+def _http_get(url: str, headers: dict, client_factory: Optional[Callable[[], Any]] = None) -> Any:
+    """GET ``url`` and return JSON; a 4xx/5xx raises ProviderHTTPError (with Retry-After)."""
+    import httpx
+
+    factory = client_factory or (lambda: httpx.Client(timeout=10.0, follow_redirects=False))
+    with factory() as client:
+        resp = client.get(url, headers={"Accept": "application/json", "User-Agent": USER_AGENT, **headers})
+    if resp.status_code >= 400:
+        raise ProviderHTTPError(resp.status_code, _retry_after(resp.headers.get("retry-after")))
+    return resp.json()
+
+
+# ---------------------------------------------------------------------------------------------
+# Provider fetchers. Each runs only when ``detect`` found a credential, returns a normalized dict
+# and may raise ProviderHTTPError.
+# ---------------------------------------------------------------------------------------------
 
 def fetch_anthropic() -> dict:
-    result = _core_usage("anthropic")
+    snapshot = _core_snapshot("anthropic")
+    reason = str(getattr(snapshot, "unavailable_reason", "") or "")
+    if reason and "oauth" in reason.lower():
+        return _no_subscription("anthropic", "Only an Anthropic API key is set. Plan limits need a Claude "
+                                             "sign-in (`hermes auth`).")
+    result = _from_core_snapshot("anthropic", snapshot)
     if result:
         return result
     return _unavailable(
@@ -222,6 +381,74 @@ def fetch_anthropic() -> dict:
         "Hermes couldn't read your Claude limits. The usage API needs a full Claude sign-in; "
         "tokens from `claude setup-token` only carry the inference scope.",
     )
+
+
+def fetch_codex() -> dict:
+    snapshot = _core_snapshot("openai-codex")
+    if snapshot is not None and _plan_is_free(getattr(snapshot, "plan", None)):
+        return _no_subscription("codex", "Signed in with a free ChatGPT account. No paid plan to track.")
+    result = _from_core_snapshot("codex", snapshot)
+    if result:
+        return result
+    return _unavailable("codex", "Hermes couldn't read your Codex limits right now. Check `hermes auth status`.")
+
+
+def fetch_opencode() -> dict:
+    result = _from_core_snapshot("opencode", _core_snapshot("opencode-go"))
+    if result:
+        result["plan"] = result.get("plan") or "Go"
+        return result
+    return _unavailable("opencode", "OpenCode didn't return Go usage for this key. Zen keys are pay-as-you-go "
+                                    "and have no subscription windows.")
+
+
+def fetch_nous() -> dict:
+    try:
+        from agent.account_usage import build_nous_credits_snapshot
+        from hermes_cli.nous_account import get_nous_portal_account_info
+
+        info = get_nous_portal_account_info(force_fresh=True)
+    except Exception as exc:
+        log.debug("quota-gauge: nous portal read failed: %s", exc)
+        return _unavailable("nous", "Hermes couldn't reach the Nous Portal right now.")
+    if not getattr(info, "logged_in", False):
+        return _inactive("nous")
+    snapshot = build_nous_credits_snapshot(info)
+    sub = getattr(info, "subscription", None)
+    windows = list(getattr(snapshot, "windows", ()) or ())
+    if sub is None and not windows:
+        return _no_subscription("nous", "Signed in to the Nous Portal without a subscription.")
+    details = [d for d in (getattr(snapshot, "details", ()) or ())
+               if not str(d).lower().startswith(("top up", "(or run"))]
+    result = _from_core_snapshot("nous", snapshot)
+    if result:
+        result["details"] = details
+        return result
+    return _result("nous", windows=[], plan=getattr(sub, "plan", None), source="hermes", details=details) \
+        if details else _unavailable("nous", "The Nous Portal returned no usage windows for this plan.")
+
+
+def fetch_xai() -> dict:
+    result = _from_core_snapshot("xai", _core_snapshot("xai-oauth"))
+    if result:
+        return result
+    return _unavailable(
+        "xai",
+        "Hermes doesn't expose your Grok subscription limits to plugins yet. Token totals below still track.",
+    )
+
+
+def fetch_antigravity() -> dict:
+    # Hermes has no Google AI / Antigravity sign-in to ask, and catalog rule 11 forbids reading
+    # Antigravity's own token files, so the card only lights up once core grows a route.
+    return _inactive("antigravity")
+
+
+def fetch_devin() -> dict:
+    # Devin publishes ACU consumption only to Enterprise admins (v3 enterprise/consumption); a
+    # personal or Teams key has no quota endpoint, so the card states that instead of guessing.
+    return _unavailable("devin", "Devin key found. Devin publishes ACU consumption only to Enterprise "
+                                 "admins, so there's no quota bar for this key.")
 
 
 # Command Code ---------------------------------------------------------------------------------
@@ -252,8 +479,8 @@ def _cc_plan_name(plan_id: Optional[str]) -> Optional[str]:
 def fetch_commandcode(client_factory: Optional[Callable[[], Any]] = None) -> dict:
     key = _secret("COMMANDCODE_API_KEY")
     if not key:
-        return _unavailable("commandcode", "Add your Command Code API key (COMMANDCODE_API_KEY) in "
-                            "Settings → Plugins → Quota Gauge.", code="no_credentials")
+        return _unavailable("commandcode", "Hermes has a Command Code credential, but the plugin reads the key "
+                                           "from COMMANDCODE_API_KEY. Set it in Settings → Plugins → Quota Gauge.")
     import httpx
 
     headers = {"Authorization": f"Bearer {key}", "Accept": "application/json", "User-Agent": USER_AGENT}
@@ -318,28 +545,254 @@ def fetch_commandcode(client_factory: Optional[Callable[[], Any]] = None) -> dic
     if purchased:
         details.append(f"${purchased:,.2f} top-up credits")
 
+    if not plan_id and not [w for w in windows if w]:
+        return _no_subscription("commandcode", "No Command Code subscription on this key (pay-as-you-go credits only).")
     if not windows and not details:
         return _unavailable("commandcode", "Command Code returned no usage windows for this key.")
     return _result("commandcode", windows=windows, plan=_cc_plan_name(plan_id), source="api", details=details,
                    warning=warning)
 
 
-# xAI ------------------------------------------------------------------------------------------
+# Z.ai (GLM Coding Plan) -----------------------------------------------------------------------
 
-def fetch_xai() -> dict:
-    result = _core_usage("xai-oauth")
-    if result:
-        return result
-    return _unavailable(
-        "xai",
-        "Hermes doesn't expose your Grok subscription limits to plugins yet. Token totals below still track.",
-    )
+_ZAI_HOSTS = ("https://api.z.ai", "https://open.bigmodel.cn")
+_ZAI_UNIT_MINUTES = {1: 1440, 3: 60, 5: 1, 6: 10080}
+
+
+def parse_zai(payload: Any) -> dict:
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        raise ProviderHTTPError(502)
+    plan = next((data.get(k) for k in ("planName", "plan", "plan_type", "packageName", "level")
+                 if isinstance(data.get(k), str) and data.get(k)), None)
+    windows, details = [], []
+    for raw in data.get("limits") or ():
+        if not isinstance(raw, dict) or raw.get("type") not in ("TOKENS_LIMIT", "CREDIT_LIMIT", "TIME_LIMIT"):
+            continue
+        cap, current, left = _num(raw.get("usage")), _num(raw.get("currentValue")), _num(raw.get("remaining"))
+        percent = _num(raw.get("percentage"))
+        if cap and cap > 0 and (left is not None or current is not None):
+            used = cap - left if left is not None else current
+            percent = max(0.0, min(cap, used or 0.0)) / cap * 100.0
+        if percent is None:
+            continue
+        if raw.get("type") == "TIME_LIMIT":
+            detail = f"{int(cap - (left or 0)):,} of {int(cap):,} tool calls" if cap and left is not None else None
+            windows.append(_window("mcp", "MCP", percent, raw.get("nextResetTime"), detail))
+            continue
+        number, unit = raw.get("number"), raw.get("unit")
+        minutes = number * _ZAI_UNIT_MINUTES[unit] if isinstance(number, int) and unit in _ZAI_UNIT_MINUTES else None
+        wid, label = _span_label(minutes)
+        windows.append(_window(wid, label, percent, raw.get("nextResetTime")))
+    if not [w for w in windows if w]:
+        return _no_subscription("zai", "This Z.ai key has no GLM Coding Plan.")
+    return _result("zai", windows=windows, plan=plan, source="api", details=details)
+
+
+def fetch_zai(client_factory: Optional[Callable[[], Any]] = None) -> dict:
+    key, _ = _first_secret("zai")
+    if not key:
+        return _unavailable("zai", "Hermes has a Z.ai credential, but the plugin reads the key from ZAI_API_KEY. "
+                                   "Set it in Settings → Plugins → Quota Gauge.")
+    last: Optional[ProviderHTTPError] = None
+    for host in _ZAI_HOSTS:  # global first, then the China-mainland BigModel host
+        try:
+            return parse_zai(_http_get(host + "/api/monitor/usage/quota/limit",
+                                       {"Authorization": f"Bearer {key}"}, client_factory))
+        except ProviderHTTPError as exc:
+            if exc.status not in (401, 403):
+                raise
+            last = exc
+    raise last or ProviderHTTPError(401)
+
+
+# Kimi Code ------------------------------------------------------------------------------------
+
+_KIMI_UNIT_MINUTES = {"TIME_UNIT_MINUTE": 1, "TIME_UNIT_HOUR": 60, "TIME_UNIT_DAY": 1440, "TIME_UNIT_WEEK": 10080}
+
+
+def _kimi_window(detail: Any, minutes: Optional[float], fallback: tuple[str, str]) -> Optional[dict]:
+    if not isinstance(detail, dict):
+        return None
+    cap, used, left = _num(_f(detail.get("limit"))), _num(_f(detail.get("used"))), _num(_f(detail.get("remaining")))
+    ratio = _num(_f(detail.get("ratio") if detail.get("ratio") is not None else detail.get("usedRatio")))
+    if cap and cap > 0:
+        used = used if used is not None else (cap - left if left is not None else None)
+        if used is None:
+            return None
+        percent, text = used / cap * 100.0, f"{int(used):,} of {int(cap):,} requests"
+    elif ratio is not None:
+        percent, text = (ratio * 100.0 if ratio <= 1 else ratio), None
+    else:
+        return None
+    wid, label = _span_label(minutes) if minutes else fallback
+    return _window(wid, label, percent, detail.get("resetTime"), text)
+
+
+def _f(value: Any) -> Any:
+    """Kimi sends counts as strings."""
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return value
+
+
+def parse_kimi(payload: Any) -> dict:
+    if not isinstance(payload, dict):
+        raise ProviderHTTPError(502)
+    blocks = [payload]
+    if isinstance(payload.get("usages"), list):  # newer pooled shape
+        blocks = [u for u in payload["usages"] if isinstance(u, dict)] or blocks
+    windows = []
+    for block in blocks:
+        for item in block.get("limits") or ():
+            if not isinstance(item, dict):
+                continue
+            win = item.get("window") or {}
+            dur, unit = _num(_f(win.get("duration"))), _KIMI_UNIT_MINUTES.get(str(win.get("timeUnit") or ""))
+            windows.append(_kimi_window(item.get("detail"), dur * unit if dur and unit else None, ("5h", "5h")))
+        windows.append(_kimi_window(block.get("usage") or block.get("detail"), None, ("week", "Week")))
+    windows = [w for w in windows if w]
+    plan = None
+    for key in ("membership", "level", "plan", "tier"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            value = value.get("level") or value.get("name") or value.get("title")
+        if isinstance(value, str) and value:
+            plan = value.replace("LEVEL_", "").replace("_", " ").title()
+            break
+    if not windows:
+        return _no_subscription("kimi", "This key has no Kimi Code membership.")
+    return _result("kimi", windows=windows, plan=plan, source="api")
+
+
+def fetch_kimi(client_factory: Optional[Callable[[], Any]] = None) -> dict:
+    key, _ = _first_secret("kimi")
+    if not key:
+        return _unavailable("kimi", "Hermes has a Kimi credential, but the plugin reads the key from KIMI_API_KEY. "
+                                    "Set it in Settings → Plugins → Quota Gauge.")
+    return parse_kimi(_http_get("https://api.kimi.com/coding/v1/usages", {"Authorization": f"Bearer {key}"},
+                                client_factory))
+
+
+# MiniMax (Coding Plan) ------------------------------------------------------------------------
+
+def _mm_window(total: Any, left: Any, left_pct: Any, start: Any, end: Any, remains_ms: Any,
+               fallback: tuple[str, str]) -> Optional[dict]:
+    total, left, left_pct = _num(total), _num(left), _num(left_pct)
+    if left_pct is not None:
+        used_pct = 100.0 - (left_pct * 100.0 if left_pct <= 1 else left_pct)
+    elif total and total > 0 and left is not None:  # *_usage_count is the REMAINING count
+        used_pct = (total - left) / total * 100.0
+    else:
+        return None
+    start_s, end_s = _epoch(start), _epoch(end)
+    reset = end_s or (time.time() + float(remains_ms) / 1000.0 if _num(remains_ms) else None)
+    minutes = (end_s - start_s) / 60.0 if start_s and end_s and end_s > start_s else None
+    wid, label = _span_label(round(minutes)) if minutes else fallback
+    detail = f"{int(total - left):,} of {int(total):,} prompts" if total and left is not None else None
+    return _window(wid, label, used_pct, reset, detail)
+
+
+def parse_minimax(payload: Any) -> dict:
+    if not isinstance(payload, dict):
+        raise ProviderHTTPError(502)
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    base = payload.get("base_resp") or data.get("base_resp") or {}
+    rows = [r for r in (data.get("model_remains") or []) if isinstance(r, dict)]
+    if not rows:
+        if base.get("status_code") in (1004, 2049):
+            raise ProviderHTTPError(401)
+        return _no_subscription("minimax", "This MiniMax key has no Coding Plan.")
+    text_rows = [r for r in rows if "minimax-m" in str(r.get("model_name", "")).lower()] or rows[:1]
+    row = text_rows[0]
+    windows = [
+        _mm_window(row.get("current_interval_total_count"), row.get("current_interval_usage_count"),
+                   row.get("current_interval_remaining_percent"), row.get("start_time"), row.get("end_time"),
+                   row.get("remains_time"), ("5h", "5h")),
+    ]
+    if _num(row.get("current_weekly_total_count")):
+        windows.append(_mm_window(row.get("current_weekly_total_count"), row.get("current_weekly_usage_count"),
+                                  row.get("current_weekly_remaining_percent"), row.get("weekly_start_time"),
+                                  row.get("weekly_end_time"), row.get("weekly_remains_time"), ("week", "Week")))
+    plan = next((data.get(k) for k in ("current_subscribe_title", "plan_name", "combo_title")
+                 if isinstance(data.get(k), str) and data.get(k)), None)
+    windows = [w for w in windows if w]
+    if not windows:
+        return _no_subscription("minimax", "This MiniMax key has no Coding Plan.")
+    return _result("minimax", windows=windows, plan=plan, source="api")
+
+
+def fetch_minimax(client_factory: Optional[Callable[[], Any]] = None) -> dict:
+    key, name = _first_secret("minimax")
+    if not key:
+        return _unavailable("minimax", "Hermes has a MiniMax sign-in, but the plugin can only read a Coding Plan "
+                                       "key from MINIMAX_API_KEY. Set it in Settings → Plugins → Quota Gauge.")
+    host = "https://api.minimaxi.com" if name == "MINIMAX_CN_API_KEY" else "https://api.minimax.io"
+    return parse_minimax(_http_get(host + "/v1/api/openplatform/coding_plan/remains",
+                                   {"Authorization": f"Bearer {key}"}, client_factory))
+
+
+# GitHub Copilot -------------------------------------------------------------------------------
+
+_COPILOT_PLANS = {"individual": "Pro", "individual_pro": "Pro+", "business": "Business", "enterprise": "Enterprise"}
+
+
+def parse_copilot(payload: Any) -> dict:
+    if not isinstance(payload, dict):
+        raise ProviderHTTPError(502)
+    plan = str(payload.get("copilot_plan") or "")
+    if _plan_is_free(plan) or payload.get("access_type_sku") == "free_limited_copilot":
+        return _no_subscription("copilot", "Copilot Free on this account. No paid plan to track.")
+    reset = payload.get("quota_reset_date_utc") or payload.get("quota_reset_date")
+    snaps = payload.get("quota_snapshots") or {}
+    windows, unlimited = [], []
+    for key, label in (("premium_interactions", "Premium"), ("chat", "Chat"), ("completions", "Completions")):
+        snap = snaps.get(key)
+        if not isinstance(snap, dict):
+            continue
+        if snap.get("unlimited"):
+            unlimited.append(label.lower())
+            continue
+        left_pct, cap, left = _num(snap.get("percent_remaining")), _num(snap.get("entitlement")), _num(snap.get("remaining"))
+        if left_pct is None and cap and cap > 0 and left is not None:
+            left_pct = left / cap * 100.0
+        if left_pct is None:
+            continue
+        detail = f"{int(left):,} of {int(cap):,} left" if cap and left is not None else None
+        windows.append(_window(key, label, 100.0 - left_pct, reset, detail))
+    details = [f"Unlimited {' and '.join(unlimited)}"] if unlimited else []
+    if not windows and not details:
+        return _unavailable("copilot", "GitHub returned no Copilot quota for this token.")
+    return _result("copilot", windows=windows, plan=_COPILOT_PLANS.get(plan, plan.replace("_", " ").title() or None),
+                   source="api", details=details)
+
+
+def fetch_copilot(client_factory: Optional[Callable[[], Any]] = None) -> dict:
+    key, _ = _first_secret("copilot")
+    if not key:
+        return _unavailable("copilot", "Signed in to Copilot in Hermes, but Hermes doesn't expose that token to "
+                                       "plugins. Set COPILOT_GITHUB_TOKEN to show quota bars.")
+    return parse_copilot(_http_get("https://api.github.com/copilot_internal/user",
+                                   {"Authorization": f"token {key}", "X-GitHub-Api-Version": "2025-04-01"},
+                                   client_factory))
 
 
 FETCHERS: dict[str, Callable[[], dict]] = {
     "anthropic": fetch_anthropic,
+    "codex": fetch_codex,
     "commandcode": fetch_commandcode,
     "xai": fetch_xai,
+    "antigravity": fetch_antigravity,
+    "opencode": fetch_opencode,
+    "devin": fetch_devin,
+    "copilot": fetch_copilot,
+    "nous": fetch_nous,
+    "zai": fetch_zai,
+    "kimi": fetch_kimi,
+    "minimax": fetch_minimax,
 }
 
 
@@ -394,8 +847,11 @@ def _error_entry(pid: str, prev: Optional[dict], message: str, now: float, backo
 def get_quota(force: bool = False) -> dict:
     home_key = str(_hermes_home())
     now = time.time()
+    signed_in = {pid: _detect_cached(home_key, pid, force=force) for pid in PROVIDERS}
     due = []
     for pid in PROVIDERS:
+        if signed_in[pid] is None:
+            continue  # no credential: no network request
         entry = _quota_cache.get((home_key, pid))
         if entry is None:
             due.append(pid)
@@ -413,16 +869,21 @@ def get_quota(force: bool = False) -> dict:
             wait(futures, timeout=FETCH_DEADLINE_S)
     providers = {}
     for pid in PROVIDERS:
-        entry = _quota_cache.get((home_key, pid))
-        if entry is None:
-            providers[pid] = _unavailable(pid, "Still loading…", code="loading")
-            continue
-        data = dict(entry["data"])
-        data["fetched_at"] = entry["fetched_at"]
-        data["stale"] = bool(entry.get("error")) and data.get("status") == "ok"
-        data["error"] = entry.get("error")
+        if signed_in[pid] is None:
+            data = _inactive(pid)
+        else:
+            entry = _quota_cache.get((home_key, pid))
+            if entry is None:
+                providers[pid] = {**_unavailable(pid, "Still loading…", code="loading"), "signed_in": signed_in[pid]}
+                continue
+            data = dict(entry["data"])
+            data["fetched_at"] = entry["fetched_at"]
+            data["stale"] = bool(entry.get("error")) and data.get("status") == "ok"
+            data["error"] = entry.get("error")
+        data["signed_in"] = signed_in[pid]
+        data["hidden"] = data.get("status") in HIDDEN_STATUSES
         providers[pid] = data
-    return {"generated_at": now, "providers": providers}
+    return {"generated_at": now, "order": list(PROVIDERS), "providers": providers}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -469,13 +930,22 @@ FROM session_model_usage WHERE COALESCE(last_seen, first_seen, 0) >= ?
 """
 
 
+# Hermes billing-provider slug -> card id. Anything else keeps its own slug (still charted).
+_PROVIDER_ALIASES = {
+    "xai-oauth": "xai", "grok": "xai",
+    "command-code": "commandcode", "command_code": "commandcode", "commandcode-anthropic": "commandcode",
+    "commandcode-chat": "commandcode", "commandcode-claude": "commandcode",
+    "openai-codex": "codex",
+    "opencode-go": "opencode", "opencode-zen": "opencode",
+    "copilot-acp": "copilot",
+    "kimi-coding": "kimi", "kimi-coding-cn": "kimi",
+    "minimax-cn": "minimax", "minimax-oauth": "minimax",
+}
+
+
 def normalize_provider(raw: Any) -> str:
     p = str(raw or "").strip().lower()
-    if p in ("xai", "xai-oauth", "grok"):
-        return "xai"
-    if p in ("commandcode", "command-code", "command_code"):
-        return "commandcode"
-    return p or "unknown"
+    return _PROVIDER_ALIASES.get(p, p) or "unknown"
 
 
 def spread(delta: dict, start: float, end: float) -> dict[int, dict]:
@@ -742,11 +1212,17 @@ def build_usage(conn: sqlite3.Connection, tz_name: Optional[str], now: Optional[
         "SELECT t, SUM(input), SUM(output), SUM(cache_read), SUM(cache_write) FROM buckets "
         "WHERE t >= ? AND t < ? GROUP BY t ORDER BY t", (lo, hi)).fetchall()
     series = {name: {"unit": unit, "bars": _bin(rows, e)} for name, (unit, e) in edges.items()}
-    providers = {}
+    providers: dict[str, dict] = {}
     for p, *vals in conn.execute(
             "SELECT provider, input, output, cache_read, cache_write, first_at FROM totals").fetchall():
-        counts = dict(zip(KINDS, (int(v or 0) for v in vals[:4])))
-        providers[p] = {**counts, "total": sum(counts.values()), "first_at": vals[4]}
+        # Rows written before a slug got its alias still land on the right card.
+        slot = providers.setdefault(normalize_provider(p), {**dict.fromkeys(KINDS, 0), "first_at": None})
+        for k, v in zip(KINDS, vals[:4]):
+            slot[k] += int(v or 0)
+        if vals[4] is not None:
+            slot["first_at"] = vals[4] if slot["first_at"] is None else min(slot["first_at"], vals[4])
+    for slot in providers.values():
+        slot["total"] = sum(slot[k] for k in KINDS)
     return {
         "generated_at": now,
         "tz": getattr(tz, "key", "UTC"),
@@ -762,7 +1238,9 @@ def build_usage(conn: sqlite3.Connection, tz_name: Optional[str], now: Optional[
 
 @router.get("/health")
 def health() -> dict:
-    return {"ok": True, "version": VERSION}
+    home_key = str(_hermes_home())
+    return {"ok": True, "version": VERSION,
+            "signed_in": {pid: _detect_cached(home_key, pid) for pid in PROVIDERS}}
 
 
 @router.get("/quota")

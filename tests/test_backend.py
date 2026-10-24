@@ -225,11 +225,29 @@ def test_commandcode_auth_failure_raises_status(api, monkeypatch):
 
 def test_commandcode_without_key_is_unavailable(api, monkeypatch):
     monkeypatch.setattr(api, "_secret", lambda name: None)
-    assert api.fetch_commandcode()["status"] == "no_credentials"
+    result = api.fetch_commandcode()
+    assert result["status"] == "unavailable" and "COMMANDCODE_API_KEY" in result["message"]
+
+
+def test_commandcode_pay_as_you_go_is_no_subscription(api, monkeypatch):
+    monkeypatch.setattr(api, "_secret", lambda name: "cc-test-key")
+    routes = {
+        "/alpha/whoami": (200, {}),
+        "/alpha/billing/credits": (200, {"credits": {"purchasedCredits": 5}, "windowLimits": {"limited": False}}),
+        "/alpha/billing/subscriptions": (200, {"data": None}),
+    }
+    assert api.fetch_commandcode(client_factory=lambda: FakeClient(routes))["status"] == "no_subscription"
+
+
+def only_signed_in(api, monkeypatch, *pids):
+    api._detect_cache.clear()
+    api._quota_cache.clear()
+    monkeypatch.setattr(api, "detect", lambda pid: "hermes:test" if pid in pids else None)
 
 
 def test_quota_cache_keeps_last_good_reading_on_error(api, monkeypatch, tmp_path):
     monkeypatch.setattr(api, "_hermes_home", lambda: tmp_path)
+    only_signed_in(api, monkeypatch, "xai")
     calls = {"n": 0}
 
     def flaky():
@@ -239,11 +257,136 @@ def test_quota_cache_keeps_last_good_reading_on_error(api, monkeypatch, tmp_path
         raise api.ProviderHTTPError(429)
 
     monkeypatch.setitem(api.FETCHERS, "xai", flaky)
-    monkeypatch.setitem(api.FETCHERS, "anthropic", lambda: api._unavailable("anthropic", "n/a"))
-    monkeypatch.setitem(api.FETCHERS, "commandcode", lambda: api._unavailable("commandcode", "n/a"))
     first = api.get_quota()["providers"]["xai"]
-    assert first["windows"][0]["remaining_percent"] == 60.0
+    assert first["windows"][0]["remaining_percent"] == 60.0 and first["hidden"] is False
     api._quota_cache[(str(tmp_path), "xai")]["fetched_at"] -= 10_000  # expire it
     second = api.get_quota()["providers"]["xai"]
     assert second["status"] == "ok" and second["stale"] is True
     assert "Rate limited" in second["error"]
+
+
+def test_providers_without_credentials_are_hidden_and_never_fetched(api, monkeypatch, tmp_path):
+    monkeypatch.setattr(api, "_hermes_home", lambda: tmp_path)
+    only_signed_in(api, monkeypatch, "codex")
+    called = []
+    for pid in api.PROVIDERS:
+        monkeypatch.setitem(api.FETCHERS, pid, lambda pid=pid: called.append(pid) or api._result(
+            pid, windows=[api._window("5h", "5h", 10.0)], source="test"))
+    out = api.get_quota()
+    assert called == ["codex"]
+    assert out["order"] == list(api.PROVIDERS)
+    assert out["providers"]["codex"]["hidden"] is False
+    for pid in set(api.PROVIDERS) - {"codex"}:
+        p = out["providers"][pid]
+        assert p["status"] == "inactive" and p["hidden"] is True and p["signed_in"] is None
+        assert p["message"] == api.SPECS[pid].setup
+
+
+def test_detect_prefers_declared_secret_then_hermes_pool(api, monkeypatch):
+    monkeypatch.setattr(api, "_secret", lambda name: "k" if name == "GLM_API_KEY" else None)
+    monkeypatch.setattr(api, "_pool_has", lambda slug: slug == "openai-codex")
+    assert api.detect("zai") == "secret:GLM_API_KEY"
+    assert api.detect("codex") == "hermes:openai-codex"
+    assert api.detect("kimi") is None
+    assert api.detect("antigravity") is None
+
+
+def test_every_card_has_a_fetcher_and_setup_hint(api):
+    assert set(api.FETCHERS) == set(api.PROVIDERS) == set(api.SPECS)
+    assert all(spec.setup for spec in api.SPECS.values())
+
+
+class Snap:
+    def __init__(self, plan=None, windows=(), reason=None, details=()):
+        self.plan, self.windows, self.unavailable_reason, self.details = plan, windows, reason, details
+
+
+class Win:
+    def __init__(self, label, used, reset=None):
+        self.label, self.used_percent, self.reset_at, self.detail, self.scope = label, used, reset, None, "account"
+
+
+def test_codex_maps_core_windows_and_hides_free_plans(api, monkeypatch):
+    monkeypatch.setattr(api, "_core_snapshot", lambda slug: Snap("Plus", (Win("Session", 30.0), Win("Weekly", 55.0))))
+    result = api.fetch_codex()
+    assert result["plan"] == "Plus" and [w["id"] for w in result["windows"]] == ["5h", "week"]
+    assert result["windows"][1]["remaining_percent"] == 45.0
+    monkeypatch.setattr(api, "_core_snapshot", lambda slug: Snap("Free", (Win("Weekly", 5.0),)))
+    assert api.fetch_codex()["status"] == "no_subscription"
+
+
+def test_anthropic_api_key_only_is_no_subscription(api, monkeypatch):
+    monkeypatch.setattr(api, "_core_snapshot", lambda slug: Snap(
+        reason="Anthropic account limits are only available for OAuth-backed Claude accounts."))
+    assert api.fetch_anthropic()["status"] == "no_subscription"
+
+
+def test_opencode_go_windows_through_core(api, monkeypatch):
+    monkeypatch.setattr(api, "_core_snapshot", lambda slug: Snap(None, (
+        Win("Rolling window", 12.0), Win("Weekly", 40.0), Win("Monthly", 70.0))))
+    result = api.fetch_opencode()
+    assert result["plan"] == "Go" and [w["label"] for w in result["windows"]] == ["5h", "Week", "Month"]
+
+
+def test_parse_zai_coding_plan(api):
+    payload = {"code": 200, "success": True, "data": {"planName": "Pro", "limits": [
+        {"type": "TOKENS_LIMIT", "unit": 3, "number": 5, "percentage": 12, "nextResetTime": 1800000000000},
+        {"type": "TOKENS_LIMIT", "unit": 6, "number": 1, "percentage": 40, "nextResetTime": 1800300000000},
+        {"type": "TIME_LIMIT", "unit": 5, "number": 1, "usage": 1000, "currentValue": 250, "remaining": 750,
+         "percentage": 25, "nextResetTime": 1801000000000},
+    ]}}
+    result = api.parse_zai(payload)
+    assert result["status"] == "ok" and result["plan"] == "Pro"
+    by_id = {w["id"]: w for w in result["windows"]}
+    assert by_id["5h"]["used_percent"] == 12 and by_id["week"]["used_percent"] == 40
+    assert by_id["mcp"]["used_percent"] == 25.0 and by_id["5h"]["resets_at"] == pytest.approx(1800000000.0)
+    assert api.parse_zai({"code": 200, "data": {"limits": []}})["status"] == "no_subscription"
+
+
+def test_parse_kimi_counts(api):
+    payload = {
+        "usage": {"limit": "2048", "used": "214", "remaining": "1834", "resetTime": "2026-11-09T15:23:13Z"},
+        "limits": [{"window": {"duration": 300, "timeUnit": "TIME_UNIT_MINUTE"},
+                    "detail": {"limit": "200", "used": "139", "remaining": "61", "resetTime": "2026-11-06T13:33:02Z"}}],
+    }
+    result = api.parse_kimi(payload)
+    by_id = {w["id"]: w for w in result["windows"]}
+    assert by_id["5h"]["used_percent"] == pytest.approx(69.5)
+    assert by_id["week"]["used_percent"] == pytest.approx(10.45, abs=0.01)
+    assert api.parse_kimi({})["status"] == "no_subscription"
+
+
+def test_parse_minimax_counts_are_remaining(api):
+    start, end = 1800000000000, 1800000000000 + 5 * 3600 * 1000
+    payload = {"base_resp": {"status_code": 0}, "current_subscribe_title": "Plus", "model_remains": [{
+        "model_name": "MiniMax-M2", "start_time": start, "end_time": end,
+        "current_interval_total_count": 1500, "current_interval_usage_count": 1200,
+        "current_weekly_total_count": 0}]}
+    result = api.parse_minimax(payload)
+    assert result["plan"] == "Plus" and len(result["windows"]) == 1
+    w = result["windows"][0]
+    assert w["id"] == "5h" and w["used_percent"] == 20.0 and w["resets_at"] == pytest.approx(end / 1000)
+    assert api.parse_minimax({"base_resp": {"status_code": 0}, "model_remains": []})["status"] == "no_subscription"
+
+
+def test_parse_copilot(api):
+    payload = {"copilot_plan": "individual", "quota_reset_date": "2026-11-01", "quota_snapshots": {
+        "premium_interactions": {"entitlement": 300, "remaining": 225, "percent_remaining": 75.0, "unlimited": False},
+        "chat": {"unlimited": True}, "completions": {"unlimited": True}}}
+    result = api.parse_copilot(payload)
+    assert result["plan"] == "Pro" and result["windows"][0]["remaining_percent"] == 75.0
+    assert result["details"] == ["Unlimited chat and completions"]
+    assert api.parse_copilot({"copilot_plan": "free"})["status"] == "no_subscription"
+
+
+def test_new_provider_slugs_fold_into_cards(api, ledger, tmp_path):
+    assert api.normalize_provider("openai-codex") == "codex"
+    assert api.normalize_provider("opencode-go") == "opencode"
+    assert api.normalize_provider("kimi-coding") == "kimi"
+    assert api.normalize_provider("some-new-provider") == "some-new-provider"
+    # totals written under an old raw slug are merged onto the card at read time
+    ledger.execute("INSERT INTO totals (provider, input, output, cache_read, cache_write, first_at) "
+                   "VALUES ('commandcode-anthropic', 5, 0, 0, 0, 100), ('commandcode', 7, 1, 0, 0, 50)")
+    usage = api.build_usage(ledger, "UTC", now=T0)
+    assert usage["providers"]["commandcode"]["total"] == 13
+    assert usage["providers"]["commandcode"]["first_at"] == 50

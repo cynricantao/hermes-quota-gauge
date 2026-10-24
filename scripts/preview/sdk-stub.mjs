@@ -1,12 +1,12 @@
 
 import { QueryClient, QueryClientProvider, useQuery as rqUseQuery } from '@tanstack/react-query'
-import { IconLogin, IconSend, IconBolt, IconDeviceFloppy, IconRefresh, IconInfoCircle, IconAlertTriangle, IconChartBar, IconPlug, IconActivity } from '@tabler/icons-react'
+import { IconLogin, IconSend, IconBolt, IconDeviceFloppy, IconRefresh, IconInfoCircle, IconAlertTriangle, IconChartBar, IconPlug, IconActivity, IconEyeOff, IconChevronDown } from '@tabler/icons-react'
 import { jsx } from 'react/jsx-runtime'
 export const queryClient = new QueryClient()
 export const useQuery = opts => rqUseQuery(opts, queryClient)
 export { QueryClientProvider }
 export const icons = { LogIn: IconLogin, Send: IconSend, Zap: IconBolt, Save: IconDeviceFloppy, RefreshCw: IconRefresh,
-  Info: IconInfoCircle, AlertTriangle: IconAlertTriangle, BarChart3: IconChartBar, Plug: IconPlug, Activity: IconActivity }
+  Info: IconInfoCircle, AlertTriangle: IconAlertTriangle, BarChart3: IconChartBar, Plug: IconPlug, Activity: IconActivity, EyeOff: IconEyeOff, ChevronDown: IconChevronDown }
 export function Tip({ children }) { return children }
 const cn = (...a) => a.filter(Boolean).join(' ')
 // Same markup/classes as apps/desktop/src/components/ui/segmented-control.tsx

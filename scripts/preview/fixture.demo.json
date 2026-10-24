@@ -38,7 +38,44 @@
      "label": "Near limit",
      "level": "warn",
      "detail": "Anthropic flags the weekly window as close to its limit"
-    }
+    },
+    "signed_in": "hermes:anthropic",
+    "hidden": false
+   },
+   "codex": {
+    "id": "codex",
+    "name": "ChatGPT / Codex",
+    "status": "ok",
+    "plan": "Plus",
+    "source": "hermes",
+    "windows": [
+     {
+      "id": "5h",
+      "label": "5h",
+      "used_percent": 22.0,
+      "remaining_percent": 78.0,
+      "resets_at": 1794511800.0,
+      "detail": null,
+      "scope": "account"
+     },
+     {
+      "id": "week",
+      "label": "Week",
+      "used_percent": 48.0,
+      "remaining_percent": 52.0,
+      "resets_at": 1794853200.0,
+      "detail": null,
+      "scope": "account"
+     }
+    ],
+    "details": [],
+    "warning": null,
+    "message": null,
+    "fetched_at": 1794500388.0,
+    "stale": false,
+    "error": null,
+    "signed_in": "hermes:codex",
+    "hidden": false
    },
    "commandcode": {
     "id": "commandcode",
@@ -80,7 +117,9 @@
     "fetched_at": 1794500388.0,
     "stale": false,
     "error": null,
-    "warning": null
+    "warning": null,
+    "signed_in": "hermes:commandcode",
+    "hidden": false
    },
    "xai": {
     "id": "xai",
@@ -104,9 +143,129 @@
     "fetched_at": 1794500388.0,
     "stale": false,
     "error": null,
-    "warning": null
+    "warning": null,
+    "signed_in": "hermes:xai",
+    "hidden": false
+   },
+   "antigravity": {
+    "id": "antigravity",
+    "name": "Antigravity",
+    "status": "inactive",
+    "plan": null,
+    "source": "",
+    "windows": [],
+    "details": [],
+    "warning": null,
+    "message": "Hermes has no Google AI / Antigravity sign-in, so there's nothing to read yet.",
+    "signed_in": null,
+    "hidden": true
+   },
+   "opencode": {
+    "id": "opencode",
+    "name": "OpenCode Go",
+    "status": "inactive",
+    "plan": null,
+    "source": "",
+    "windows": [],
+    "details": [],
+    "warning": null,
+    "message": "No OpenCode Go key. Add OPENCODE_GO_API_KEY (Zen keys are pay-as-you-go).",
+    "signed_in": null,
+    "hidden": true
+   },
+   "devin": {
+    "id": "devin",
+    "name": "Devin",
+    "status": "inactive",
+    "plan": null,
+    "source": "",
+    "windows": [],
+    "details": [],
+    "warning": null,
+    "message": "No Devin key. Add DEVIN_API_KEY in Settings \u2192 Plugins \u2192 Quota Gauge.",
+    "signed_in": null,
+    "hidden": true
+   },
+   "copilot": {
+    "id": "copilot",
+    "name": "GitHub Copilot",
+    "status": "no_subscription",
+    "plan": null,
+    "source": "",
+    "windows": [],
+    "details": [],
+    "warning": null,
+    "message": "Copilot Free on this account. No paid plan to track.",
+    "signed_in": "hermes:copilot",
+    "hidden": true
+   },
+   "nous": {
+    "id": "nous",
+    "name": "Nous Portal",
+    "status": "inactive",
+    "plan": null,
+    "source": "",
+    "windows": [],
+    "details": [],
+    "warning": null,
+    "message": "No Nous Portal sign-in in Hermes. Run `hermes auth add nous`.",
+    "signed_in": null,
+    "hidden": true
+   },
+   "zai": {
+    "id": "zai",
+    "name": "Z.ai GLM",
+    "status": "inactive",
+    "plan": null,
+    "source": "",
+    "windows": [],
+    "details": [],
+    "warning": null,
+    "message": "No Z.ai key. Add ZAI_API_KEY (the GLM Coding Plan key).",
+    "signed_in": null,
+    "hidden": true
+   },
+   "kimi": {
+    "id": "kimi",
+    "name": "Kimi Code",
+    "status": "inactive",
+    "plan": null,
+    "source": "",
+    "windows": [],
+    "details": [],
+    "warning": null,
+    "message": "No Kimi Code key. Add KIMI_API_KEY from the Kimi Code console.",
+    "signed_in": null,
+    "hidden": true
+   },
+   "minimax": {
+    "id": "minimax",
+    "name": "MiniMax",
+    "status": "inactive",
+    "plan": null,
+    "source": "",
+    "windows": [],
+    "details": [],
+    "warning": null,
+    "message": "No MiniMax key. Add MINIMAX_API_KEY (the Coding Plan key).",
+    "signed_in": null,
+    "hidden": true
    }
-  }
+  },
+  "order": [
+   "anthropic",
+   "codex",
+   "commandcode",
+   "xai",
+   "antigravity",
+   "opencode",
+   "devin",
+   "copilot",
+   "nous",
+   "zai",
+   "kimi",
+   "minimax"
+  ]
  },
  "usage": {
   "generated_at": 1794500388.0,
@@ -640,6 +799,22 @@
     "cache_read": 34161966,
     "cache_write": 2717429,
     "total": 38898056,
+    "first_at": 1791936000.0
+   },
+   "codex": {
+    "input": 3812000,
+    "output": 402100,
+    "cache_read": 21950000,
+    "cache_write": 0,
+    "total": 26164100,
+    "first_at": 1791936000.0
+   },
+   "copilot": {
+    "input": 120400,
+    "output": 30100,
+    "cache_read": 0,
+    "cache_write": 0,
+    "total": 150500,
     "first_at": 1791936000.0
    }
   }
