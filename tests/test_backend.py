@@ -167,6 +167,43 @@ def test_all_time_switches_to_weeks_for_long_history(api, ledger, tmp_path):
     assert sum(b["input"] for b in usage["series"]["all"]["bars"]) == 1
 
 
+def test_models_are_tracked_per_range(api, ledger, tmp_path):
+    state = tmp_path / "state.db"
+    make_state(state, [
+        ("s1", "claude-opus", "anthropic", 100, 50, 1000, 10, T0, T0 + 600),
+        ("s2", "deepseek/v4", "commandcode", 20, 5, 0, 0, T0 + 100, T0 + 200),
+        ("s3", "claude-opus", "anthropic", 1, 1, 0, 0, T0 + 100, T0 + 200),
+    ])
+    api.sync_ledger(ledger, state, now=T0 + 700)
+    set_rows(state, [("s2", "deepseek/v4", "commandcode", 220, 5, 0, 0, T0 + 100, T0 + 900)])
+    api.sync_ledger(ledger, state, now=T0 + 950)
+    usage = api.build_usage(ledger, "UTC", now=T0 + 1000)
+    models = usage["series"]["today"]["models"]
+    assert [(m["provider"], m["model"]) for m in models] == [("anthropic", "claude-opus"), ("commandcode", "deepseek/v4")]
+    assert (models[0]["input"], models[0]["output"], models[0]["cache_read"], models[0]["total"]) == (101, 51, 1000, 1162)
+    assert models[1]["total"] == 225
+    # per-model totals add up to the chart
+    bars = usage["series"]["today"]["bars"]
+    assert sum(m["total"] for m in models) == sum(sum(b[k] for k in api.KINDS) for b in bars)
+    assert usage["series"]["all"]["models"] == models
+
+
+def test_models_backfill_from_an_older_ledger(api, ledger, tmp_path):
+    state = tmp_path / "state.db"
+    make_state(state, [("s1", "grok-4", "xai-oauth", 40, 2, 0, 0, T0, T0 + 60)])
+    api.sync_ledger(ledger, state, now=T0 + 100)
+    # simulate a ledger written before per-model tracking existed
+    ledger.execute("DELETE FROM model_buckets")
+    ledger.execute("DELETE FROM meta WHERE k = 'models_v'")
+    set_rows(state, [("s1", "grok-4", "xai-oauth", 50, 2, 0, 0, T0, T0 + 120)])
+    api.sync_ledger(ledger, state, now=T0 + 200)
+    models = api.build_usage(ledger, "UTC", now=T0 + 300)["series"]["today"]["models"]
+    assert [(m["provider"], m["model"], m["input"], m["output"]) for m in models] == [("xai", "grok-4", 50, 2)]
+    # backfill runs once
+    api.sync_ledger(ledger, state, now=T0 + 400)
+    assert ledger.execute("SELECT SUM(input) FROM model_buckets").fetchone()[0] == 50
+
+
 class FakeResponse:
     def __init__(self, status, payload):
         self.status_code = status

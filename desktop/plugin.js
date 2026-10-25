@@ -4,7 +4,8 @@
  * A pane with one card per live subscription: each window drains from 100% remaining toward 0%,
  * and the header shows tokens tracked since day one (hover for the exact count). Providers this
  * profile has no sign-in or paid plan for collapse into a "Hidden/Inactive" dropdown. Below,
- * stacked token bars for Today / 7d / All time, every provider combined.
+ * stacked token bars for Today / 7d / All time, every provider combined, and a collapsible
+ * per-model breakdown for the same range (hover a model for its input/output/cache split).
  *
  * Data comes from this plugin's backend (dashboard/plugin_api.py) through ctx.rest. Loaded
  * uncompiled: UI is jsx() calls, imports are limited to the SDK and React.
@@ -217,7 +218,7 @@ function backendMissing(error) {
 // ---------------------------------------------------------------------------------------------
 
 function Logo({ id, small = false }) {
-  const meta = PROVIDERS.find(p => p.id === id)
+  const meta = PROVIDERS.find(p => p.id === id) || { id, name: String(id || '?').toUpperCase(), tile: 'var(--ui-text-secondary)' }
   const Mark = MARKS[id]
   return jsx('span', {
     className: small ? 'qg-logo qg-logo-sm' : 'qg-logo',
@@ -576,7 +577,120 @@ function UsageCard({ usage, nowMs, loading }) {
           )
         })
       }),
-      bars.length ? jsx(Bars, { bars, unit, range, hover, setHover, nowMs }) : jsx('div', { className: 'qg-chart qg-chart-loading' })
+      bars.length ? jsx(Bars, { bars, unit, range, hover, setHover, nowMs }) : jsx('div', { className: 'qg-chart qg-chart-loading' }),
+      Array.isArray(series?.models) ? jsx(ModelsSection, { models: series.models, range }) : null
+    ]
+  })
+}
+
+// Per-model breakdown ---------------------------------------------------------------------------
+
+const providerName = id => PROVIDERS.find(p => p.id === id)?.name || id || 'Unknown'
+/** "deepseek/deepseek-v4.1-flash" → "deepseek-v4.1-flash"; the full id stays in the tooltip. */
+const shortModel = model => String(model || 'unknown').split('/').pop() || String(model)
+
+function ModelTip({ m, rangeTotal }) {
+  const share = rangeTotal > 0 ? (m.total / rangeTotal) * 100 : 0
+  return jsxs('div', {
+    className: 'qg-tip',
+    children: [
+      jsx('div', { className: 'qg-tip-strong', children: m.model }),
+      jsx('div', { className: 'qg-tip-muted', children: `${providerName(m.provider)} · ${pct(share)}% of this range` }),
+      jsx('div', { className: 'qg-tip-strong', children: `${exact(m.total)} tokens` }),
+      jsx('div', {
+        className: 'qg-tip-kinds',
+        children: KINDS.map(k => {
+          const v = Number(m[k.key]) || 0
+          return jsxs(
+            'div',
+            {
+              className: 'qg-tip-kind',
+              children: [
+                jsx('span', { className: 'qg-dot', style: { background: k.color } }),
+                jsx('span', { children: k.label }),
+                jsx('span', { className: 'qg-tip-num', children: exact(v) }),
+                jsx('span', { className: 'qg-tip-pct', children: `${m.total > 0 ? pct((v / m.total) * 100) : 0}%` })
+              ]
+            },
+            k.key
+          )
+        })
+      })
+    ]
+  })
+}
+
+function ModelRow({ m, max, rangeTotal }) {
+  const share = rangeTotal > 0 ? (m.total / rangeTotal) * 100 : 0
+  const width = max > 0 ? Math.max(1.5, (m.total / max) * 100) : 0
+  return jsx(Tip, {
+    label: jsx(ModelTip, { m, rangeTotal }),
+    side: 'left',
+    children: jsxs('div', {
+      className: 'qg-mrow',
+      tabIndex: 0,
+      'aria-label': `${m.model} (${providerName(m.provider)}): ${exact(m.total)} tokens, ${pct(share)}%`,
+      children: [
+        jsxs('div', {
+          className: 'qg-mline',
+          children: [
+            jsx(Logo, { id: m.provider, small: true }),
+            jsx('span', { className: 'qg-mname', children: shortModel(m.model) }),
+            jsx('span', { className: 'qg-spacer' }),
+            jsx('span', { className: 'qg-mtotal', children: abbreviate(m.total) }),
+            jsx('span', { className: 'qg-mpct', children: `${pct(share)}%` })
+          ]
+        }),
+        jsx('div', {
+          className: 'qg-mtrack',
+          children: jsx('div', {
+            className: 'qg-mfill',
+            style: { width: `${width}%` },
+            children: KINDS.map(k => {
+              const v = Number(m[k.key]) || 0
+              return v > 0 ? jsx('div', { className: 'qg-seg', style: { flexGrow: v, background: k.color } }, k.key) : null
+            })
+          })
+        })
+      ]
+    })
+  })
+}
+
+function ModelsSection({ models, range }) {
+  const [open, setOpen] = useState(() => storage?.get('modelsOpen', true) !== false)
+  const rangeTotal = models.reduce((acc, m) => acc + (Number(m.total) || 0), 0)
+  const max = models.reduce((acc, m) => Math.max(acc, Number(m.total) || 0), 0)
+  const toggle = () => {
+    setOpen(!open)
+    storage?.set('modelsOpen', !open)
+  }
+  return jsxs('div', {
+    className: `qg-models${open ? ' open' : ''}`,
+    children: [
+      jsxs('button', {
+        type: 'button',
+        className: 'qg-mtoggle',
+        onClick: toggle,
+        'aria-expanded': open,
+        'aria-controls': 'qg-model-list',
+        children: [
+          jsx(icons.Cpu ?? icons.BarChart3, { size: 13 }),
+          jsx('span', { children: 'By model' }),
+          jsx('span', { className: 'qg-hcount', children: models.length }),
+          jsx('span', { className: 'qg-spacer' }),
+          jsx(icons.ChevronDown, { size: 14, className: 'qg-chev' })
+        ]
+      }),
+      open
+        ? jsx('div', {
+            id: 'qg-model-list',
+            className: 'qg-mlist',
+            children: models.length
+              ? models.map(m => jsx(ModelRow, { m, max, rangeTotal }, `${m.provider}\u001f${m.model}`))
+              : jsx('div', { className: 'qg-mempty', children: range === 'today' ? 'No model usage yet today' : 'No model usage in this range' })
+          })
+        : null
     ]
   })
 }
@@ -883,6 +997,29 @@ const CSS = `
 .qg-axis-abs span{position:absolute;top:0;transform:translateX(-50%)}
 .qg-axis-abs span.first{transform:none}
 .qg-axis-abs span.last{transform:translateX(-100%)}
+
+.qg-models{display:flex;flex-direction:column;margin-top:-2px;border-top:1px solid var(--ui-stroke-tertiary);padding-top:6px}
+.qg-mtoggle{display:flex;align-items:center;gap:7px;width:calc(100% + 12px);margin:0 -6px;padding:5px 6px;border:0;border-radius:7px;background:transparent;
+  color:var(--ui-text-tertiary);font:inherit;font-size:11.5px;font-weight:600;cursor:pointer;text-align:left}
+.qg-mtoggle:hover{color:var(--ui-text-primary);background:var(--ui-control-hover-background)}
+.qg-mtoggle:focus-visible{outline:2px solid var(--ui-accent);outline-offset:-2px}
+.qg-models.open .qg-chev{transform:rotate(180deg)}
+.qg-mlist{display:flex;flex-direction:column;gap:4px;padding-top:4px}
+.qg-mrow{display:flex;flex-direction:column;gap:5px;margin:0 -6px;padding:5px 6px;border-radius:7px;outline:none;cursor:default}
+.qg-mrow:hover,.qg-mrow:focus-visible{background:var(--ui-control-hover-background)}
+.qg-mline{display:flex;align-items:center;gap:7px;min-width:0;line-height:18px}
+.qg-mname{font-weight:600;font-size:11.5px;color:var(--ui-text-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.qg-mtotal{flex:none;font-weight:650;font-size:11.5px}
+.qg-mpct{flex:none;width:30px;text-align:right;font-size:10.5px;color:var(--ui-text-tertiary)}
+.qg-mtrack{height:6px;border-radius:999px;background:color-mix(in srgb,var(--ui-text-primary) 7%,transparent);overflow:hidden}
+.qg-mfill{display:flex;height:100%;border-radius:999px;overflow:hidden;transition:width .55s cubic-bezier(.2,.8,.2,1)}
+.qg-mrow:hover .qg-mfill,.qg-mrow:focus-visible .qg-mfill{filter:saturate(1.15) brightness(1.06)}
+.qg-mempty{color:var(--ui-text-quaternary);font-size:11px;padding:6px 0 2px}
+.qg-tip-kinds{display:grid;grid-template-columns:auto auto auto auto;gap:3px 8px;margin-top:3px;align-items:center}
+.qg-tip-kind{display:contents}
+.qg-dot{width:7px;height:7px;border-radius:2px}
+.qg-tip-num{text-align:right;font-weight:600}
+.qg-tip-pct{text-align:right;opacity:.7}
 `
 
 // ---------------------------------------------------------------------------------------------

@@ -467,6 +467,62 @@
       "cache_read": 0,
       "cache_write": 0
      }
+    ],
+    "models": [
+     {
+      "model": "claude-opus-5-5",
+      "provider": "anthropic",
+      "input": 277392,
+      "output": 83216,
+      "cache_read": 6102683,
+      "cache_write": 485438,
+      "total": 6948729
+     },
+     {
+      "model": "deepseek/deepseek-v4.1-flash",
+      "provider": "commandcode",
+      "input": 186938,
+      "output": 56080,
+      "cache_read": 4112678,
+      "cache_write": 327143,
+      "total": 4682839
+     },
+     {
+      "model": "grok-4.7",
+      "provider": "xai",
+      "input": 72363,
+      "output": 21708,
+      "cache_read": 1592004,
+      "cache_write": 126636,
+      "total": 1812711
+     },
+     {
+      "model": "gpt-6-codex",
+      "provider": "codex",
+      "input": 42211,
+      "output": 12663,
+      "cache_read": 928669,
+      "cache_write": 73871,
+      "total": 1057414
+     },
+     {
+      "model": "claude-sonnet-5-5",
+      "provider": "anthropic",
+      "input": 18090,
+      "output": 5427,
+      "cache_read": 398001,
+      "cache_write": 31659,
+      "total": 453177
+     },
+     {
+      "model": "google/gemini-3.8-flash",
+      "provider": "commandcode",
+      "input": 6030,
+      "output": 1809,
+      "cache_read": 132667,
+      "cache_write": 10553,
+      "total": 151059
+     }
     ]
    },
    "7d": {
@@ -527,6 +583,62 @@
       "output": 180905,
       "cache_read": 13266704,
       "cache_write": 1055302
+     }
+    ],
+    "models": [
+     {
+      "model": "claude-opus-5-5",
+      "provider": "anthropic",
+      "input": 1212963,
+      "output": 363886,
+      "cache_read": 26685283,
+      "cache_write": 2122689,
+      "total": 30384821
+     },
+     {
+      "model": "deepseek/deepseek-v4.1-flash",
+      "provider": "commandcode",
+      "input": 817432,
+      "output": 245227,
+      "cache_read": 17983560,
+      "cache_write": 1430508,
+      "total": 20476727
+     },
+     {
+      "model": "grok-4.7",
+      "provider": "xai",
+      "input": 316425,
+      "output": 94926,
+      "cache_read": 6961378,
+      "cache_write": 553745,
+      "total": 7926474
+     },
+     {
+      "model": "gpt-6-codex",
+      "provider": "codex",
+      "input": 184581,
+      "output": 55373,
+      "cache_read": 4060803,
+      "cache_write": 323018,
+      "total": 4623775
+     },
+     {
+      "model": "claude-sonnet-5-5",
+      "provider": "anthropic",
+      "input": 79106,
+      "output": 23731,
+      "cache_read": 1740344,
+      "cache_write": 138436,
+      "total": 1981617
+     },
+     {
+      "model": "google/gemini-3.8-flash",
+      "provider": "commandcode",
+      "input": 26368,
+      "output": 7910,
+      "cache_read": 580114,
+      "cache_write": 46145,
+      "total": 660537
      }
     ]
    },
@@ -772,6 +884,62 @@
       "output": 180905,
       "cache_read": 13266704,
       "cache_write": 1055302
+     }
+    ],
+    "models": [
+     {
+      "model": "claude-opus-5-5",
+      "provider": "anthropic",
+      "input": 4211724,
+      "output": 1263511,
+      "cache_read": 92658123,
+      "cache_write": 7370524,
+      "total": 105503882
+     },
+     {
+      "model": "deepseek/deepseek-v4.1-flash",
+      "provider": "commandcode",
+      "input": 2838335,
+      "output": 851496,
+      "cache_read": 62443517,
+      "cache_write": 4967092,
+      "total": 71100440
+     },
+     {
+      "model": "grok-4.7",
+      "provider": "xai",
+      "input": 1098710,
+      "output": 329611,
+      "cache_read": 24171684,
+      "cache_write": 1922745,
+      "total": 27522750
+     },
+     {
+      "model": "gpt-6-codex",
+      "provider": "codex",
+      "input": 640914,
+      "output": 192273,
+      "cache_read": 14100149,
+      "cache_write": 1121601,
+      "total": 16054937
+     },
+     {
+      "model": "claude-sonnet-5-5",
+      "provider": "anthropic",
+      "input": 274677,
+      "output": 82402,
+      "cache_read": 6042921,
+      "cache_write": 480686,
+      "total": 6880686
+     },
+     {
+      "model": "google/gemini-3.8-flash",
+      "provider": "commandcode",
+      "input": 91559,
+      "output": 27467,
+      "cache_read": 2014307,
+      "cache_write": 160228,
+      "total": 2293561
      }
     ]
    }

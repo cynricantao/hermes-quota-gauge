@@ -912,6 +912,14 @@ CREATE TABLE IF NOT EXISTS totals (
   cache_read INTEGER NOT NULL DEFAULT 0, cache_write INTEGER NOT NULL DEFAULT 0,
   first_at REAL
 );
+CREATE TABLE IF NOT EXISTS model_buckets (
+  t INTEGER NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  input INTEGER NOT NULL DEFAULT 0, output INTEGER NOT NULL DEFAULT 0,
+  cache_read INTEGER NOT NULL DEFAULT 0, cache_write INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (t, provider, model)
+);
 """
 
 _USAGE_SQL = """
@@ -998,6 +1006,89 @@ def _open_ledger() -> sqlite3.Connection:
     return conn
 
 
+def _key_model(key: str) -> str:
+    parts = key.split("\x1f")
+    return (parts[1] if len(parts) > 1 else "").strip() or "unknown"
+
+
+def _book(lo: float, last_seen: float) -> float:
+    """Start of the span a delta is spread over: a short gap is spread evenly; across a long one
+    (pane closed, backend down) the session was mostly idle, so the growth goes where its latest
+    activity was."""
+    lo = min(lo, last_seen)
+    return last_seen if last_seen - lo > LONG_GAP_S else lo
+
+
+def _backfill_models(conn: sqlite3.Connection, state_path: Path, seen: dict) -> dict:
+    """One-time: rebuild the per-model buckets from what the ledger has already booked. Each known
+    row's last reading is placed over its lifetime from state.db (or at its last sighting when the
+    session is gone), the way a new row is booked."""
+    timing = {}
+    for row in _read_state_rows(state_path, 0):
+        key = "\x1f".join(str(x or "") for x in row[:6])
+        last_seen = float(row[11] or row[10] or 0)
+        timing[key] = (float(row[10] or last_seen), last_seen)
+    # Rough placement of each model's tokens in time, used only as weights below.
+    guess: dict[tuple[int, str], dict[str, dict]] = defaultdict(dict)
+    overall: dict[str, dict[str, dict]] = defaultdict(dict)
+    for key, (provider, *vals, seen_last) in seen.items():
+        model = _key_model(key)
+        first, last = timing.get(key, (float(seen_last or 0), float(seen_last or 0)))
+        for bt, amounts in spread(dict(zip(KINDS, vals)), _book(first, last), last).items():
+            slot = guess[(bt, provider)].setdefault(model, dict.fromkeys(KINDS, 0))
+            for k in KINDS:
+                slot[k] += amounts[k]
+        slot = overall[provider].setdefault(model, dict.fromkeys(KINDS, 0))
+        for k, v in zip(KINDS, vals):
+            slot[k] += int(v or 0)
+    # The ledger's buckets stay the truth: each one is split across models, so per-model sums
+    # always equal the chart.
+    # Iterative proportional fitting nudges the weights so each model's lifetime total also holds.
+    adds: dict[tuple[int, str, str], dict[str, int]] = defaultdict(lambda: {k: 0 for k in KINDS})
+    cells: dict[tuple[str, str], list] = defaultdict(list)  # (provider, kind) -> [(t, amount, weights)]
+    for t, provider, *vals in conn.execute(
+            "SELECT t, provider, input, output, cache_read, cache_write FROM buckets").fetchall():
+        for k, amount in zip(KINDS, vals):
+            amount = int(amount or 0)
+            if amount <= 0:
+                continue
+            target = {m: a[k] for m, a in overall.get(provider, {}).items() if a[k] > 0}
+            weights = {m: float(a[k]) for m, a in guess.get((t, provider), {}).items() if a[k] > 0} or \
+                {m: 1e-6 * v for m, v in target.items()} or {"unknown": 1.0}
+            cells[(provider, k)].append((t, amount, weights))
+    for (provider, k), rows in cells.items():
+        target = {m: a[k] for m, a in overall.get(provider, {}).items() if a[k] > 0}
+        for _ in range(30):
+            for i, (t, amount, w) in enumerate(rows):  # rows: match each bucket
+                s = sum(w.values()) or 1.0
+                rows[i] = (t, amount, {m: v * amount / s for m, v in w.items()})
+            col: dict[str, float] = defaultdict(float)
+            for _, _, w in rows:
+                for m, v in w.items():
+                    col[m] += v
+            if not target:
+                break
+            for _, _, w in rows:  # columns: match each model's total
+                for m in w:
+                    if m in target and col[m] > 0:
+                        w[m] *= target[m] / col[m]
+        for t, amount, w in rows:
+            for model, share in _split(amount, w).items():
+                adds[(t, provider, model)][k] += share
+    return adds
+
+
+def _split(amount: int, weights: dict[str, float]) -> dict[str, int]:
+    """Integer split of ``amount`` by weight; largest remainder keeps the sum exact."""
+    total = sum(weights.values())
+    names = sorted(weights)
+    shares = [amount * weights[n] / total for n in names]
+    alloc = [int(s) for s in shares]
+    for i in sorted(range(len(names)), key=lambda i: shares[i] - alloc[i], reverse=True)[:amount - sum(alloc)]:
+        alloc[i] += 1
+    return {n: a for n, a in zip(names, alloc) if a}
+
+
 def _read_state_rows(state_path: Path, since: float) -> list:
     src = sqlite3.connect(f"file:{state_path}?mode=ro", uri=True, timeout=5)
     try:
@@ -1029,7 +1120,10 @@ def sync_ledger(conn: sqlite3.Connection, state_path: Path, now: Optional[float]
         last_sync = float(meta.get("last_sync", 0) or 0)
         rows = _read_state_rows(state_path, hw - 3600 if hw else 0)
         seen = {r[0]: r[1:] for r in conn.execute(
-            "SELECT key, input, output, cache_read, cache_write, last_seen FROM seen").fetchall()}
+            "SELECT key, provider, input, output, cache_read, cache_write, last_seen FROM seen").fetchall()}
+        model_adds = _backfill_models(conn, state_path, seen) if "models_v" not in meta else \
+            defaultdict(lambda: dict.fromkeys(KINDS, 0))
+        seen = {k: v[1:] for k, v in seen.items()}
         bucket_adds: dict[tuple[int, str], dict] = defaultdict(lambda: dict.fromkeys(KINDS, 0))
         total_adds: dict[str, dict] = defaultdict(lambda: dict.fromkeys(KINDS, 0))
         first_at: dict[str, float] = {}
@@ -1059,15 +1153,13 @@ def sync_ledger(conn: sqlite3.Connection, state_path: Path, now: Optional[float]
             if not any(delta.values()):
                 continue
             changed += 1
-            # A short gap is spread evenly; across a long one (pane closed, backend down) the
-            # session was mostly idle, so the growth goes where its latest activity was.
-            lo = min(start, last_seen)
-            if last_seen - lo > LONG_GAP_S:
-                lo = last_seen
-            for bt, amounts in spread(delta, lo, last_seen).items():
+            model = _key_model(key)
+            for bt, amounts in spread(delta, _book(start, last_seen), last_seen).items():
                 slot = bucket_adds[(bt, provider)]
+                mslot = model_adds[(bt, provider, model)]
                 for k in KINDS:
                     slot[k] += amounts[k]
+                    mslot[k] += amounts[k]
             for k in KINDS:
                 total_adds[provider][k] += delta[k]
             first_at[provider] = min(first_at.get(provider, first_seen), first_seen)
@@ -1084,13 +1176,19 @@ def sync_ledger(conn: sqlite3.Connection, state_path: Path, now: Optional[float]
             "cache_write = cache_write + excluded.cache_write",
             [(bt, p, *(a[k] for k in KINDS)) for (bt, p), a in bucket_adds.items()])
         conn.executemany(
+            "INSERT INTO model_buckets (t, provider, model, input, output, cache_read, cache_write) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(t, provider, model) DO UPDATE SET "
+            "input = input + excluded.input, output = output + excluded.output, "
+            "cache_read = cache_read + excluded.cache_read, cache_write = cache_write + excluded.cache_write",
+            [(bt, p, m, *(a[k] for k in KINDS)) for (bt, p, m), a in model_adds.items() if any(a.values())])
+        conn.executemany(
             "INSERT INTO totals (provider, input, output, cache_read, cache_write, first_at) VALUES (?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(provider) DO UPDATE SET input = input + excluded.input, "
             "output = output + excluded.output, cache_read = cache_read + excluded.cache_read, "
             "cache_write = cache_write + excluded.cache_write, "
             "first_at = MIN(COALESCE(first_at, excluded.first_at), excluded.first_at)",
             [(p, *(a[k] for k in KINDS), first_at.get(p)) for p, a in total_adds.items()])
-        updates = {"hw": repr(new_hw), "last_sync": repr(now)}
+        updates = {"hw": repr(new_hw), "last_sync": repr(now), "models_v": "1"}
         if "since" not in meta:
             updates["since"] = repr(min(earliest, now) if earliest is not None else now)
         conn.executemany("INSERT INTO meta (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
@@ -1200,6 +1298,24 @@ def _bin(rows: list, edges: list[int]) -> list[dict]:
     return bars
 
 
+def _models(rows: list, lo: int, hi: int) -> list[dict]:
+    """Per (provider, model) totals for buckets in ``[lo, hi)``, biggest first."""
+    out: dict[tuple[str, str], dict] = {}
+    for t, provider, model, *vals in rows:
+        if not lo <= t < hi:
+            continue
+        p = normalize_provider(provider)
+        slot = out.setdefault((p, model), {"model": model, "provider": p, **dict.fromkeys(KINDS, 0)})
+        for k, v in zip(KINDS, vals):
+            slot[k] += int(v or 0)
+    models = []
+    for slot in out.values():
+        slot["total"] = sum(slot[k] for k in KINDS)
+        if slot["total"] > 0:
+            models.append(slot)
+    return sorted(models, key=lambda m: (-m["total"], m["model"], m["provider"]))
+
+
 def build_usage(conn: sqlite3.Connection, tz_name: Optional[str], now: Optional[float] = None) -> dict:
     now = time.time() if now is None else now
     tz = _zone(tz_name)
@@ -1211,7 +1327,11 @@ def build_usage(conn: sqlite3.Connection, tz_name: Optional[str], now: Optional[
     rows = conn.execute(
         "SELECT t, SUM(input), SUM(output), SUM(cache_read), SUM(cache_write) FROM buckets "
         "WHERE t >= ? AND t < ? GROUP BY t ORDER BY t", (lo, hi)).fetchall()
-    series = {name: {"unit": unit, "bars": _bin(rows, e)} for name, (unit, e) in edges.items()}
+    model_rows = conn.execute(
+        "SELECT t, provider, model, SUM(input), SUM(output), SUM(cache_read), SUM(cache_write) "
+        "FROM model_buckets WHERE t >= ? AND t < ? GROUP BY t, provider, model", (lo, hi)).fetchall()
+    series = {name: {"unit": unit, "bars": _bin(rows, e), "models": _models(model_rows, e[0], e[-1])}
+              for name, (unit, e) in edges.items()}
     providers: dict[str, dict] = {}
     for p, *vals in conn.execute(
             "SELECT provider, input, output, cache_read, cache_write, first_at FROM totals").fetchall():
