@@ -262,8 +262,79 @@ def test_commandcode_auth_failure_raises_status(api, monkeypatch):
 
 def test_commandcode_without_key_is_unavailable(api, monkeypatch):
     monkeypatch.setattr(api, "_secret", lambda name: None)
+    monkeypatch.setattr(api, "_pool_key", lambda slug: (None, None))
     result = api.fetch_commandcode()
     assert result["status"] == "unavailable" and "COMMANDCODE_API_KEY" in result["message"]
+
+
+def test_first_secret_falls_back_to_the_providers_own_credential(api, monkeypatch):
+    """A card must work off the key Hermes already holds, without a second copy in plugin settings."""
+    monkeypatch.setattr(api, "_pool_key", lambda slug: ("pool-key", "COMMANDCODE_API_KEY")
+                        if slug == "commandcode" else (None, None))
+    monkeypatch.setattr(api, "_secret", lambda name: "plugin-key")
+    assert api._first_secret("commandcode") == ("plugin-key", "COMMANDCODE_API_KEY")
+    monkeypatch.setattr(api, "_secret", lambda name: None)
+    assert api._first_secret("commandcode") == ("pool-key", "COMMANDCODE_API_KEY")
+    monkeypatch.setattr(api, "_pool_key", lambda slug: (None, None))
+    assert api._first_secret("commandcode") == (None, None)
+
+
+def test_commandcode_reads_through_the_pool_key_when_plugin_secret_is_unset(api, monkeypatch):
+    monkeypatch.setattr(api, "_secret", lambda name: None)
+    monkeypatch.setattr(api, "_pool_key", lambda slug: ("pool-key", "COMMANDCODE_API_KEY")
+                        if slug == "commandcode" else (None, None))
+    routes = {
+        "/alpha/whoami": (200, {}),
+        "/alpha/billing/credits": (200, {"credits": {"monthlyCredits": 30.0},
+                                        "windowLimits": {"limited": True,
+                                                         "fiveHour": {"used": 1.0, "cap": 10, "resetAt": 1800000000000},
+                                                         "weekly": {"used": 5.0, "cap": 20, "resetAt": 1800300000000}}}),
+        "/alpha/billing/subscriptions": (200, {"data": {"planId": "individual-goat",
+                                                        "currentPeriodEnd": "2027-01-15T00:00:00Z"}}),
+    }
+    result = api.fetch_commandcode(client_factory=lambda: FakeClient(routes))
+    assert result["status"] == "ok" and result["plan"] == "GOAT"
+    assert [w["id"] for w in result["windows"]] == ["5h", "week", "cycle"]
+
+
+def test_error_detail_quotes_the_provider_but_never_a_key(api):
+    class R:
+        text = ""
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            if isinstance(self._payload, Exception):
+                raise self._payload
+            return self._payload
+
+    assert api._error_detail(R({"error": {"message": "Invalid API key"}})) == "Invalid API key"
+    assert api._error_detail(R({"error": "bad key sk-ant-oat01abcdefghijklmnop"})) == ""
+    assert api._error_detail(R(ValueError("no json"))) == ""  # .text is empty
+    assert api._error_detail(R("<html>blocked</html>")) == ""
+
+
+def test_rejected_credential_replaces_the_stale_windows(api, monkeypatch, tmp_path):
+    monkeypatch.setattr(api, "_hermes_home", lambda: tmp_path)
+    only_signed_in(api, monkeypatch, "commandcode")
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return api._result("commandcode", windows=[api._window("week", "Week", 10.0)], source="test")
+        raise api.ProviderHTTPError(401, detail="Invalid API key")
+
+    monkeypatch.setitem(api.FETCHERS, "commandcode", flaky)
+    assert api.get_quota()["providers"]["commandcode"]["windows"]
+    entry = api._quota_cache[(str(tmp_path), "commandcode")]
+    entry["fetched_at"] -= 10_000
+    entry["backoff_until"] = 0.0
+    second = api.get_quota()["providers"]["commandcode"]
+    assert second["status"] == "error" and second["windows"] == [] and second["stale"] is False
+    assert second["message"].startswith("The credential was rejected.")
+    assert "Invalid API key" in second["message"]
 
 
 def test_commandcode_pay_as_you_go_is_no_subscription(api, monkeypatch):
@@ -300,6 +371,28 @@ def test_quota_cache_keeps_last_good_reading_on_error(api, monkeypatch, tmp_path
     second = api.get_quota()["providers"]["xai"]
     assert second["status"] == "ok" and second["stale"] is True
     assert "Rate limited" in second["error"]
+
+
+def test_manual_refresh_outranks_a_provider_backoff(api, monkeypatch, tmp_path):
+    """Fixing a key and pressing refresh must re-fetch now, not after the 429/401 cooldown."""
+    monkeypatch.setattr(api, "_hermes_home", lambda: tmp_path)
+    only_signed_in(api, monkeypatch, "xai")
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return api._result("xai", windows=[api._window("week", "Week", 10.0)], source="test")
+        return api._result("xai", windows=[api._window("week", "Week", 50.0)], source="test")
+
+    monkeypatch.setitem(api.FETCHERS, "xai", flaky)
+    api.get_quota()
+    entry = api._quota_cache[(str(tmp_path), "xai")]
+    entry["backoff_until"] = api.time.time() + 600
+    entry["fetched_at"] -= api.FORCE_MIN_INTERVAL_S + 1
+    assert api.get_quota()["providers"]["xai"]["windows"][0]["remaining_percent"] == 90.0  # backoff held
+    forced = api.get_quota(force=True)["providers"]["xai"]
+    assert forced["windows"][0]["remaining_percent"] == 50.0 and calls["n"] == 2
 
 
 def test_providers_without_credentials_are_hidden_and_never_fetched(api, monkeypatch, tmp_path):
@@ -427,3 +520,69 @@ def test_new_provider_slugs_fold_into_cards(api, ledger, tmp_path):
     usage = api.build_usage(ledger, "UTC", now=T0)
     assert usage["providers"]["commandcode"]["total"] == 13
     assert usage["providers"]["commandcode"]["first_at"] == 50
+
+
+# ---------------------------------------------------------------------------------------------
+# One ledger for the whole install: totals are account-wide, never per profile
+# ---------------------------------------------------------------------------------------------
+
+def test_one_ledger_path_for_every_profile(api, tmp_path, monkeypatch):
+    root = tmp_path / "hermes"
+    (root / "profiles" / "alpha").mkdir(parents=True)
+    monkeypatch.delenv("HERMES_QUOTA_GAUGE_LEDGER", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(root / "profiles" / "alpha"))
+    assert api._ledger_path() == root / "shared" / api.PLUGIN_ID / "ledger.db"
+
+    monkeypatch.setenv("HERMES_HOME", str(root))
+    assert api._ledger_path() == root / "shared" / api.PLUGIN_ID / "ledger.db"
+
+    monkeypatch.setenv("HERMES_QUOTA_GAUGE_LEDGER", str(tmp_path / "pinned.db"))
+    assert api._ledger_path() == tmp_path / "pinned.db"
+
+
+def test_sync_merges_every_home_into_the_same_ledger(api, ledger, tmp_path):
+    home_a, home_b = tmp_path / "a", tmp_path / "b"
+    home_a.mkdir()
+    home_b.mkdir()
+    state_a, state_b = home_a / "state.db", home_b / "state.db"
+    make_state(state_a, [("s1", "claude", "anthropic", 100, 50, 1000, 10, T0, T0 + 600)])
+    make_state(state_b, [("t1", "grok", "xai-oauth", 20, 5, 0, 0, T0, T0 + 600)])
+
+    api.sync_ledger(ledger, state_a, now=T0 + 700, hw_key=f"hw:{home_a}")
+    api.sync_ledger(ledger, state_b, now=T0 + 700, hw_key=f"hw:{home_b}")
+
+    assert bucket_sum(ledger, "anthropic") == (100, 50, 1000, 10)
+    assert bucket_sum(ledger, "xai") == (20, 5, 0, 0)
+
+    # both homes keep their own high-water mark, and a second pass books nothing
+    meta = dict(ledger.execute("SELECT k, v FROM meta"))
+    assert f"hw:{home_a}" in meta and f"hw:{home_b}" in meta
+    assert api.sync_ledger(ledger, state_a, now=T0 + 900, hw_key=f"hw:{home_a}") == 0
+    assert api.sync_ledger(ledger, state_b, now=T0 + 900, hw_key=f"hw:{home_b}") == 0
+    assert bucket_sum(ledger, "anthropic") == (100, 50, 1000, 10)
+
+
+def test_shared_ledger_seeds_from_the_fullest_legacy_ledger(api, tmp_path, monkeypatch):
+    root = tmp_path / "hermes"
+    profile = root / "profiles" / "alpha"
+    profile.mkdir(parents=True)
+    monkeypatch.delenv("HERMES_QUOTA_GAUGE_LEDGER", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+
+    legacy = root / "profiles" / "beta" / "plugin-data" / api.PLUGIN_ID
+    legacy.mkdir(parents=True)
+    conn = sqlite3.connect(legacy / "ledger.db")
+    conn.isolation_level = None
+    conn.executescript(api._SCHEMA)
+    conn.execute("INSERT INTO totals (provider, input, output, cache_read, cache_write, first_at) "
+                 "VALUES ('anthropic', 7, 3, 100, 0, ?)", (T0,))
+    conn.close()
+
+    target = api._ledger_path()
+    api._seed_shared_ledger(target)
+    assert target.is_file()
+    seeded = sqlite3.connect(target)
+    try:
+        assert seeded.execute("SELECT SUM(input+output+cache_read+cache_write) FROM totals").fetchone()[0] == 110
+    finally:
+        seeded.close()

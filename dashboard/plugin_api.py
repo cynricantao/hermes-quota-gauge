@@ -1,7 +1,8 @@
 """Quota Gauge backend, mounted at ``/api/plugins/quota-gauge/``.
 
 GET /quota            subscription windows for every provider card (cached per provider)
-GET /usage?tz=<IANA>  token history read from this profile's ``state.db`` into a monotonic local ledger
+GET /usage?tz=<IANA>  token history read from every profile's ``state.db`` into one monotonic
+                      account-wide ledger
 GET /health           version and which providers this profile holds a credential for
 
 A card is *live* only when this profile holds a credential for it and the provider reports a paid
@@ -20,6 +21,8 @@ from __future__ import annotations
 import bisect
 import contextvars
 import logging
+import os
+import re
 import sqlite3
 import threading
 import time
@@ -35,7 +38,7 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 PLUGIN_ID = "quota-gauge"
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 USER_AGENT = f"hermes-quota-gauge/{VERSION}"
 
 KINDS = ("input", "output", "cache_read", "cache_write")
@@ -74,8 +77,8 @@ SPECS: dict[str, ProviderSpec] = {s.id: s for s in (
                  setup="No Command Code key. Add COMMANDCODE_API_KEY in Settings → Plugins → Quota Gauge."),
     ProviderSpec("xai", "xAI", hermes=("xai-oauth",), ttl=120,
                  setup="No Grok sign-in in Hermes. Run `hermes auth add xai-oauth` (an xAI API key has no subscription)."),
-    ProviderSpec("antigravity", "Antigravity", ttl=300,
-                 setup="Hermes has no Google AI / Antigravity sign-in, so there's nothing to read yet."),
+    ProviderSpec("antigravity", "Antigravity", hermes=("antigravity-oauth", "antigravity"), ttl=300,
+                 setup="No Antigravity session. Run `hermes auth add antigravity-oauth`."),
     ProviderSpec("opencode", "OpenCode Go", hermes=("opencode-go",), secrets=("OPENCODE_GO_API_KEY",), ttl=180,
                  setup="No OpenCode Go key. Add OPENCODE_GO_API_KEY (Zen keys are pay-as-you-go)."),
     ProviderSpec("devin", "Devin", secrets=("DEVIN_API_KEY",), ttl=600,
@@ -198,10 +201,44 @@ class ProviderHTTPError(Exception):
     """An HTTP failure worth backing off on. Any exception with an int ``status`` attribute
     is treated the same way."""
 
-    def __init__(self, status: int, retry_after: Optional[float] = None):
+    def __init__(self, status: int, retry_after: Optional[float] = None, detail: str = ""):
         super().__init__(f"HTTP {status}")
         self.status = status
         self.retry_after = retry_after
+        self.detail = detail
+
+
+_TOKENISH = re.compile(r"[A-Za-z0-9_\-]{20,}")
+
+
+def _error_detail(resp: Any) -> str:
+    """The provider's own explanation for a failed call, or "".
+
+    Its message beats our guess ("the credential was rejected" hides a Cloudflare block or a plan
+    that lapsed), but an error body is not a safe place to quote: providers routinely echo the key
+    back. A snippet that contains a token-shaped run is dropped rather than shown."""
+    try:
+        body = resp.json()
+    except Exception:
+        body = None
+    text = ""
+    if isinstance(body, dict):
+        for key in ("error", "message", "detail"):
+            value = body.get(key)
+            if isinstance(value, dict):
+                value = value.get("message") or value.get("detail") or value.get("type")
+            if isinstance(value, str) and value.strip():
+                text = value.strip()
+                break
+    elif body is not None:
+        text = str(body).strip()
+    if not text:
+        raw = (getattr(resp, "text", "") or "").strip()
+        text = "" if raw[:1] == "<" else raw  # an HTML block page says nothing useful
+    text = " ".join(text.split())[:160]
+    if not text or text[:1] == "<" or _TOKENISH.search(text):
+        return ""
+    return text
 
 
 def _retry_after(value: Any) -> Optional[float]:
@@ -219,14 +256,41 @@ def _retry_after(value: Any) -> Optional[float]:
 
 def _pool_has(slug: str) -> bool:
     """Hermes's credential pool for ``slug`` holds a sign-in or key (env keys and OAuth logins both
-    land there)."""
+    land there); falls back to external-process auth verification."""
     try:
         from agent.credential_pool import load_pool
 
-        return bool(load_pool(slug).has_credentials())
+        if load_pool(slug).has_credentials():
+            return True
     except Exception as exc:
         log.debug("quota-gauge: credential pool for %s unreadable: %s", slug, exc)
+    try:
+        from hermes_cli import auth
+
+        return bool(auth.get_auth_status(slug).get("logged_in"))
+    except Exception as exc:
+        log.debug("quota-gauge: auth status for %s unreadable: %s", slug, exc)
         return False
+
+
+def _pool_key(slug: str) -> tuple[Optional[str], Optional[str]]:
+    """(api key, label) of the credential Hermes itself uses for ``slug``, or (None, None).
+
+    Read-only: ``peek`` returns the entry already in the pool and ``runtime_api_key`` is a stored
+    value, so this never rotates or refreshes a credential on the provider's behalf."""
+    try:
+        from agent.credential_pool import load_pool
+
+        entry = load_pool(slug).peek()
+    except Exception as exc:
+        log.debug("quota-gauge: credential pool for %s unreadable: %s", slug, exc)
+        return None, None
+    if entry is None:
+        return None, None
+    key = str(getattr(entry, "runtime_api_key", "") or "").strip()
+    if not key:
+        return None, None
+    return key, str(getattr(entry, "label", "") or "").strip() or None
 
 
 def detect(pid: str) -> Optional[str]:
@@ -255,11 +319,19 @@ def _detect_cached(home_key: str, pid: str, force: bool = False) -> Optional[str
 
 
 def _first_secret(pid: str) -> tuple[Optional[str], Optional[str]]:
-    """(value, env name) of the first declared secret that is set for ``pid``."""
+    """(value, source name) of the first usable key for ``pid``.
+
+    The plugin's own declared secret wins; when it is unset the provider's own credential in
+    Hermes's pool is used, because that is the same key the provider itself is configured with —
+    a card must never demand a second copy of a key Hermes already holds."""
     for name in SPECS[pid].secrets:
         value = _secret(name)
         if value:
             return value, name
+    for slug in SPECS[pid].hermes:
+        value, label = _pool_key(slug)
+        if value:
+            return value, label or slug
     return None, None
 
 
@@ -439,9 +511,13 @@ def fetch_xai() -> dict:
 
 
 def fetch_antigravity() -> dict:
-    # Hermes has no Google AI / Antigravity sign-in to ask, and catalog rule 11 forbids reading
-    # Antigravity's own token files, so the card only lights up once core grows a route.
-    return _inactive("antigravity")
+    result = _from_core_snapshot("antigravity", _core_snapshot("antigravity-oauth"))
+    if result:
+        return result
+    return _unavailable(
+        "antigravity",
+        "Antigravity active via agy. Token totals track below.",
+    )
 
 
 def fetch_devin() -> dict:
@@ -477,7 +553,7 @@ def _cc_plan_name(plan_id: Optional[str]) -> Optional[str]:
 
 
 def fetch_commandcode(client_factory: Optional[Callable[[], Any]] = None) -> dict:
-    key = _secret("COMMANDCODE_API_KEY")
+    key, _source = _first_secret("commandcode")
     if not key:
         return _unavailable("commandcode", "Hermes has a Command Code credential, but the plugin reads the key "
                                            "from COMMANDCODE_API_KEY. Set it in Settings → Plugins → Quota Gauge.")
@@ -489,7 +565,8 @@ def fetch_commandcode(client_factory: Optional[Callable[[], Any]] = None) -> dic
     def get(client, path: str, **params) -> Any:
         resp = client.get(_CC_BASE + path, params={k: v for k, v in params.items() if v})
         if resp.status_code >= 400:
-            raise ProviderHTTPError(resp.status_code, _retry_after(resp.headers.get("retry-after")))
+            raise ProviderHTTPError(resp.status_code, _retry_after(resp.headers.get("retry-after")),
+                                    _error_detail(resp))
         return resp.json()
 
     with factory() as client:
@@ -819,6 +896,7 @@ def _fetch_into_cache(home_key: str, pid: str) -> None:
             entry = {"data": data, "fetched_at": now, "error": None, "backoff_until": 0.0}
         except Exception as exc:
             status = getattr(exc, "status", None)
+            keep_prev = True
             if isinstance(status, int):
                 wait_s = _retry_after(getattr(exc, "retry_after", None)) or 120.0
                 if status == 429:
@@ -826,11 +904,18 @@ def _fetch_into_cache(home_key: str, pid: str) -> None:
                 message = ("The credential was rejected." if status in (401, 403)
                            else "Rate limited by the provider, backing off." if status == 429
                            else f"Provider error (HTTP {status}).")
-            else:  # network errors, malformed JSON
+                detail = " ".join(str(getattr(exc, "detail", "") or "").split())
+                if detail and detail.lower() not in message.lower():
+                    message = f"{message} {detail}"
+                # A rejected credential is not a transient miss: the numbers behind it can't be
+                # trusted until the key changes, so the card states the problem instead of
+                # keeping the last good bars under a warning triangle.
+                keep_prev = status not in (401, 403)
+            else:  # network errors, malformed JSON, and any failure without an HTTP status
                 log.debug("quota-gauge: %s fetch failed: %s", pid, exc, exc_info=True)
                 wait_s = 120.0
-                message = f"Couldn't reach {PROVIDER_NAMES[pid]} ({type(exc).__name__})."
-            entry = _error_entry(pid, prev, message, now, wait_s)
+                message = getattr(exc, "message", None) or f"Couldn't reach {PROVIDER_NAMES[pid]} ({type(exc).__name__})."
+            entry = _error_entry(pid, prev if keep_prev else None, message, now, wait_s)
         _quota_cache[key] = entry
     finally:
         lock.release()
@@ -857,7 +942,9 @@ def get_quota(force: bool = False) -> dict:
             due.append(pid)
             continue
         age = now - entry["fetched_at"]
-        if entry.get("backoff_until", 0) > now:
+        # ``force`` is the pane's refresh button: explicit intent outranks a provider backoff,
+        # otherwise a credential the user just fixed stays invisible for the whole cooldown.
+        if entry.get("backoff_until", 0) > now and not force:
             continue
         if age >= QUOTA_TTL_S[pid] or (force and age >= FORCE_MIN_INTERVAL_S) or entry.get("error"):
             due.append(pid)
@@ -941,6 +1028,7 @@ FROM session_model_usage WHERE COALESCE(last_seen, first_seen, 0) >= ?
 # Hermes billing-provider slug -> card id. Anything else keeps its own slug (still charted).
 _PROVIDER_ALIASES = {
     "xai-oauth": "xai", "grok": "xai",
+    "antigravity-oauth": "antigravity", "agy": "antigravity",
     "command-code": "commandcode", "command_code": "commandcode", "commandcode-anthropic": "commandcode",
     "commandcode-chat": "commandcode", "commandcode-claude": "commandcode",
     "openai-codex": "codex",
@@ -991,15 +1079,116 @@ def spread(delta: dict, start: float, end: float) -> dict[int, dict]:
     return out
 
 
-def _open_ledger() -> sqlite3.Connection:
+def _shared_root() -> Path:
+    """The Hermes root that holds every profile, not the profile that happens to be serving."""
     try:
-        from plugins.plugin_storage import plugin_db
+        from hermes_constants import get_default_hermes_root
 
-        conn = plugin_db(PLUGIN_ID, "ledger.db")
-    except ImportError:  # older Hermes: same location, plain sqlite
-        directory = _hermes_home() / "plugin-data" / PLUGIN_ID
-        directory.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(directory / "ledger.db", check_same_thread=False, timeout=10)
+        return Path(get_default_hermes_root())
+    except Exception:
+        pass
+    try:
+        return _hermes_home()
+    except Exception:  # no Hermes runtime around (unit tests): derive it from HERMES_HOME
+        raw = os.environ.get("HERMES_HOME", "").strip()
+        home = Path(os.path.expanduser(os.path.expandvars(raw))) if raw else Path.home() / ".hermes"
+        return home.parent.parent if home.parent.name == "profiles" else home
+
+
+def _profile_homes() -> list[Path]:
+    """Every Hermes home on this install: the default home plus each profile under it."""
+    root = _shared_root()
+    homes: list[Path] = []
+
+    def add(home: Path) -> None:
+        try:
+            key = home.resolve()
+        except OSError:
+            key = home
+        if key not in seen and (home / "state.db").is_file():
+            seen.add(key)
+            homes.append(home)
+
+    seen: set[Path] = set()
+    add(root)
+    for db in sorted((root / "profiles").glob("*/state.db")):
+        add(db.parent)
+    try:
+        add(_hermes_home())
+    except Exception:
+        pass
+    return homes
+
+
+def _ledger_path() -> Path:
+    """One ledger for the whole install: usage is counted account-wide, never per profile."""
+    override = os.environ.get("HERMES_QUOTA_GAUGE_LEDGER", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return _shared_root() / "shared" / PLUGIN_ID / "ledger.db"
+
+
+def _legacy_ledgers() -> list[Path]:
+    root = _shared_root()
+    found = [root / "plugin-data" / PLUGIN_ID / "ledger.db"]
+    found += sorted((root / "profiles").glob(f"*/plugin-data/{PLUGIN_ID}/ledger.db"))
+    return [p for p in found if p.is_file()]
+
+
+def _seed_shared_ledger(target: Path) -> None:
+    """First run on the shared path adopts the biggest existing per-profile ledger, so switching
+    or adding a profile never resets the totals."""
+    try:
+        if target.is_symlink() or (target.exists() and target.stat().st_size > 0):
+            return
+    except OSError:
+        return
+    best: Optional[Path] = None
+    best_total = -1
+    for path in _legacy_ledgers():
+        try:
+            src = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+            try:
+                total = src.execute(
+                    "SELECT COALESCE(SUM(input + output + cache_read + cache_write), 0) FROM totals"
+                ).fetchone()[0]
+            finally:
+                src.close()
+        except sqlite3.Error:
+            continue
+        if total and total > best_total:
+            best, best_total = path, int(total)
+    if best is None:
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging = target.with_name(f"{target.name}.seed-{os.getpid()}")
+    try:
+        src = sqlite3.connect(f"file:{best}?mode=ro", uri=True, timeout=5)
+        try:
+            src.execute("VACUUM INTO ?", (str(staging),))
+        finally:
+            src.close()
+        os.replace(staging, target)
+    except (sqlite3.Error, OSError) as exc:
+        log.debug("quota-gauge: could not seed the shared ledger: %s", exc)
+    finally:
+        try:
+            staging.unlink()
+        except OSError:
+            pass
+
+
+def _open_ledger() -> sqlite3.Connection:
+    target = _ledger_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _seed_shared_ledger(target)
+    try:
+        from hermes_cli.sqlite_util import open_db  # WAL + network-fs rules, same as plugin storage
+
+        conn = open_db(target, db_label=f"shared/{PLUGIN_ID}/ledger.db",
+                       foreign_keys=True, check_same_thread=False)
+    except ImportError:  # older Hermes: plain sqlite
+        conn = sqlite3.connect(target, check_same_thread=False, timeout=10)
     conn.isolation_level = None  # explicit transactions below
     conn.execute("PRAGMA busy_timeout = 10000")
     conn.executescript(_SCHEMA)
@@ -1101,8 +1290,12 @@ def _read_state_rows(state_path: Path, since: float) -> list:
         src.close()
 
 
-def sync_ledger(conn: sqlite3.Connection, state_path: Path, now: Optional[float] = None) -> int:
+def sync_ledger(conn: sqlite3.Connection, state_path: Path, now: Optional[float] = None,
+                hw_key: str = "hw") -> int:
     """Fold new token usage from state.db into the ledger. Returns the number of rows that changed.
+
+    The ledger is shared by every profile, so each home carries its own high-water mark
+    (``hw_key``) while the buckets and totals stay account-wide.
 
     Each ``session_model_usage`` row is a running total. The ledger remembers the last value it
     saw per row and books only the growth, so deleting or pruning sessions never lowers a total.
@@ -1116,7 +1309,7 @@ def sync_ledger(conn: sqlite3.Connection, state_path: Path, now: Optional[float]
     conn.execute("BEGIN IMMEDIATE")
     try:
         meta = dict(conn.execute("SELECT k, v FROM meta").fetchall())
-        hw = float(meta.get("hw", 0) or 0)
+        hw = float(meta.get(hw_key, 0) or 0)
         last_sync = float(meta.get("last_sync", 0) or 0)
         rows = _read_state_rows(state_path, hw - 3600 if hw else 0)
         seen = {r[0]: r[1:] for r in conn.execute(
@@ -1188,7 +1381,10 @@ def sync_ledger(conn: sqlite3.Connection, state_path: Path, now: Optional[float]
             "cache_write = cache_write + excluded.cache_write, "
             "first_at = MIN(COALESCE(first_at, excluded.first_at), excluded.first_at)",
             [(p, *(a[k] for k in KINDS), first_at.get(p)) for p, a in total_adds.items()])
-        updates = {"hw": repr(new_hw), "last_sync": repr(now), "models_v": "1"}
+        updates = {"hw": repr(max(new_hw, float(meta.get("hw", 0) or 0))), "last_sync": repr(now),
+                   "models_v": "1"}
+        if hw_key != "hw":
+            updates[hw_key] = repr(new_hw)
         if "since" not in meta:
             updates["since"] = repr(min(earliest, now) if earliest is not None else now)
         conn.executemany("INSERT INTO meta (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
@@ -1205,16 +1401,21 @@ _sync_lock = threading.Lock()
 
 
 def sync_now(force: bool = False) -> None:
-    home = _hermes_home()
-    key = str(home)
+    """Fold every profile's state.db into the one shared ledger, so the totals are account-wide."""
+    key = "shared"
     if not force and time.monotonic() - _last_sync.get(key, -1e9) < SYNC_MIN_INTERVAL_S:
         return
     with _sync_lock:
         if not force and time.monotonic() - _last_sync.get(key, -1e9) < SYNC_MIN_INTERVAL_S:
             return
+        homes = _profile_homes() or [_hermes_home()]
         conn = _open_ledger()
         try:
-            sync_ledger(conn, home / "state.db")
+            for home in homes:
+                try:
+                    sync_ledger(conn, home / "state.db", hw_key=f"hw:{home}")
+                except Exception as exc:  # one unreadable home must not stop the others
+                    log.debug("quota-gauge: sync failed for %s: %s", home, exc)
         finally:
             conn.close()
         _last_sync[key] = time.monotonic()

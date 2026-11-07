@@ -592,7 +592,7 @@ const shortModel = model => String(model || 'unknown').split('/').pop() || Strin
 function ModelTip({ m, rangeTotal }) {
   const share = rangeTotal > 0 ? (m.total / rangeTotal) * 100 : 0
   return jsxs('div', {
-    className: 'qg-tip',
+    className: 'qg-tip qg-mtipwrap',
     children: [
       jsx('div', { className: 'qg-tip-strong', children: m.model }),
       jsx('div', { className: 'qg-tip-muted', children: `${providerName(m.provider)} · ${pct(share)}% of this range` }),
@@ -625,7 +625,6 @@ function ModelRow({ m, max, rangeTotal }) {
   const width = max > 0 ? Math.max(1.5, (m.total / max) * 100) : 0
   return jsx(Tip, {
     label: jsx(ModelTip, { m, rangeTotal }),
-    side: 'left',
     children: jsxs('div', {
       className: 'qg-mrow',
       tabIndex: 0,
@@ -1015,7 +1014,8 @@ const CSS = `
 .qg-mfill{display:flex;height:100%;border-radius:999px;overflow:hidden;transition:width .55s cubic-bezier(.2,.8,.2,1)}
 .qg-mrow:hover .qg-mfill,.qg-mrow:focus-visible .qg-mfill{filter:saturate(1.15) brightness(1.06)}
 .qg-mempty{color:var(--ui-text-quaternary);font-size:11px;padding:6px 0 2px}
-.qg-tip-kinds{display:grid;grid-template-columns:auto auto auto auto;gap:3px 8px;margin-top:3px;align-items:center}
+.qg-tip-kinds{display:grid;grid-template-columns:auto auto auto auto;gap:3px 8px;margin-top:3px;align-items:center;white-space:nowrap;overflow-wrap:normal}
+.qg-mtipwrap{min-width:190px}
 .qg-tip-kind{display:contents}
 .qg-dot{width:7px;height:7px;border-radius:2px}
 .qg-tip-num{text-align:right;font-weight:600}

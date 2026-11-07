@@ -81,10 +81,11 @@ Token totals and charts need no credentials. They come from your own Hermes usag
 
 Disclosed per catalog rule 13:
 
-- **Reads** this profile's `state.db` **read-only**: only the `session_model_usage` token
+- **Reads** every profile's `state.db` **read-only**: only the `session_model_usage` token
   counters and session timestamps, never message content.
-- **Writes** one file, `<hermes home>/plugin-data/quota-gauge/ledger.db`: running token totals in
-  15-minute buckets, so deleting or pruning sessions never lowers your lifetime numbers.
+- **Writes** one file, `<hermes home>/shared/quota-gauge/ledger.db`: running token totals in
+  15-minute buckets for the whole install, so deleting or pruning sessions never lowers your
+  lifetime numbers and switching or adding a profile never resets them.
 - **Reads credentials only through Hermes:** the credential pool (to learn *whether* a provider is
   signed in) and `get_secret` for the keys listed above. For GitHub Copilot, Hermes's pool may ask
   the `gh` CLI for a token while answering that question; that is Hermes's own lookup.

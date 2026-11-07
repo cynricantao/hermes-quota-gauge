@@ -1,6 +1,6 @@
 name: quota-gauge
-version: "0.2.0"
-description: "Desktop pane with draining quota bars for the AI subscriptions this profile is signed in to (Anthropic, ChatGPT/Codex, Command Code, xAI, OpenCode Go, GitHub Copilot, Nous Portal, Z.ai, Kimi Code, MiniMax, Devin, Antigravity), with the rest filed under Hidden/Inactive, plus daily token charts (input, output, cache read, cache write) built from this profile's own usage records. No telemetry."
+version: "0.2.1"
+description: "Desktop pane with draining quota bars for the AI subscriptions this profile is signed in to (Anthropic, ChatGPT/Codex, Command Code, xAI, OpenCode Go, GitHub Copilot, Nous Portal, Z.ai, Kimi Code, MiniMax, Devin, Antigravity), with the rest filed under Hidden/Inactive, plus daily token charts (input, output, cache read, cache write) built from every profile's usage records, merged into one account-wide ledger. No telemetry."
 author: cynricantao
 license: MIT
 homepage: https://github.com/cynricantao/hermes-quota-gauge
