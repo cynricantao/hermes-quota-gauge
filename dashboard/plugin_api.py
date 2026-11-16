@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import bisect
 import contextvars
+import importlib.util
 import logging
 import os
 import re
@@ -293,6 +294,49 @@ def _pool_key(slug: str) -> tuple[Optional[str], Optional[str]]:
     return key, str(getattr(entry, "label", "") or "").strip() or None
 
 
+_bridge_cache: dict[str, Any] = {"mtime": None, "module": None}
+_bridge_lock = threading.Lock()
+
+
+def _bridge():
+    """``dashboard/local_bridge.py`` (gitignored, personal) loaded on change, or None.
+
+    It fills the providers Hermes has no public plugin route for yet (xAI, Antigravity,
+    spend-token Anthropic). The published plugin ships without it, so every call site treats a
+    missing bridge as "no extra provider", never as an error.
+    """
+    path = Path(__file__).with_name("local_bridge.py")
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    with _bridge_lock:
+        if _bridge_cache["mtime"] == mtime:
+            return _bridge_cache["module"]
+        module = None
+        try:
+            spec = importlib.util.spec_from_file_location("hermes_quota_gauge_local_bridge", path)
+            if spec and spec.loader:
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+        except Exception as exc:
+            log.warning("quota-gauge: local_bridge.py failed to load: %s", exc)
+            module = None
+        _bridge_cache.update(mtime=mtime, module=module)
+        return module
+
+
+def _bridge_quota(pid: str) -> Optional[dict]:
+    """``local_bridge.<pid>_quota()`` when the bridge defines it; None otherwise."""
+    bridge = _bridge()
+    fn = getattr(bridge, f"{pid}_quota", None) if bridge is not None else None
+    try:
+        return fn() if callable(fn) else None
+    except Exception as exc:
+        log.warning("quota-gauge: local_bridge.%s_quota failed: %s", pid, exc)
+        return None
+
+
 def detect(pid: str) -> Optional[str]:
     """Where this profile keeps a credential for ``pid``: ``"secret:NAME"``, ``"hermes:slug"`` or None."""
     spec = SPECS[pid]
@@ -452,7 +496,7 @@ def fetch_anthropic() -> dict:
     if reason and "oauth" in reason.lower():
         return _no_subscription("anthropic", "Only an Anthropic API key is set. Plan limits need a Claude "
                                              "sign-in (`hermes auth`).")
-    result = _from_core_snapshot("anthropic", snapshot)
+    result = _from_core_snapshot("anthropic", snapshot) or _bridge_quota("anthropic")
     if result:
         return result
     return _unavailable(
@@ -511,9 +555,12 @@ def fetch_xai() -> dict:
     result = _from_core_snapshot("xai", _core_snapshot("xai-oauth"))
     if result:
         return result
-    # Core has no Grok fetcher, so read the same billing config grok.com's own usage page reads,
-    # with the xAI OAuth token Hermes already holds. It reports credits and their period, not
-    # percentage windows, so the card carries details rather than invented bars.
+    # Core has no Grok fetcher. The local bridge reads grok.com's weekly window with Hermes's
+    # xAI sign-in; without it, fall back to the billing config, which reports a credits period
+    # rather than a percentage window.
+    br = _bridge_quota("xai")
+    if br:
+        return br
     native = _grok_credits()
     if native:
         return native
@@ -528,6 +575,9 @@ def fetch_antigravity() -> dict:
     result = _from_core_snapshot("antigravity", _core_snapshot("antigravity-oauth"))
     if result:
         return result
+    br = _bridge_quota("antigravity")
+    if br:
+        return br
     native = _antigravity_quota()
     if native:
         return native
