@@ -1856,12 +1856,18 @@ def _grok_credits() -> Optional[dict]:
                 period[key] = stamps[0]
     details = []
     if period.get("start"):
-        details.append("Period start: " + datetime.fromtimestamp(
+        details.append("Period: " + datetime.fromtimestamp(
             period["start"], tz=timezone.utc).strftime("%b %d %H:%M UTC"))
     if period.get("end"):
-        details.append("Period end: " + datetime.fromtimestamp(
+        details.append("Resets " + datetime.fromtimestamp(
             period["end"], tz=timezone.utc).strftime("%b %d %H:%M UTC"))
-    details.append("Grok reports a credits period, not usage percentages, to OAuth sign-ins.")
-    if not (period.get("start") or period.get("end")):
+    if not details:
         return None
-    return _result("xai", windows=[], source="grok_credits", details=details)
+    result = _result("xai", windows=[], source="grok_credits", details=details)
+    # A card with no windows falls back to ``message`` in the pane; without one it reads
+    # "Loading…" forever, which is exactly how this looked broken.
+    result["message"] = (
+        "Grok publishes a credits period, not usage windows, to an OAuth sign-in. "
+        "Bars appear here only if Grok starts reporting a window."
+    )
+    return result
