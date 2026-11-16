@@ -302,6 +302,13 @@ def detect(pid: str) -> Optional[str]:
     for slug in spec.hermes:
         if _pool_has(slug):
             return f"hermes:{slug}"
+    # Sources Hermes's credential pool does not model, but a usable token for this provider
+    # lives on this machine anyway. Anthropic: the same resolver core's account-usage route
+    # uses (env key or the Claude CLI sign-in), so a card core can fill is never filed inactive.
+    if pid == "anthropic" and _anthropic_core_token():
+        return "token:anthropic"
+    if pid == "antigravity" and _windows_cred_blob(_AG_CRED_TARGET) is not None:
+        return "wincred:gemini:antigravity"
     return None
 
 
@@ -504,9 +511,16 @@ def fetch_xai() -> dict:
     result = _from_core_snapshot("xai", _core_snapshot("xai-oauth"))
     if result:
         return result
+    # Core has no Grok fetcher, so read the same billing config grok.com's own usage page reads,
+    # with the xAI OAuth token Hermes already holds. It reports credits and their period, not
+    # percentage windows, so the card carries details rather than invented bars.
+    native = _grok_credits()
+    if native:
+        return native
     return _unavailable(
         "xai",
-        "Hermes doesn't expose your Grok subscription limits to plugins yet. Token totals below still track.",
+        "Grok's billing config returned neither windows nor credits for this sign-in. Token "
+        "totals below still track.",
     )
 
 
@@ -514,9 +528,13 @@ def fetch_antigravity() -> dict:
     result = _from_core_snapshot("antigravity", _core_snapshot("antigravity-oauth"))
     if result:
         return result
+    native = _antigravity_quota()
+    if native:
+        return native
     return _unavailable(
         "antigravity",
-        "Antigravity active via agy. Token totals track below.",
+        "Antigravity is signed in on this machine but its quota summary could not be read. "
+        "Token totals track below.",
     )
 
 
@@ -1582,3 +1600,268 @@ def usage(tz: str = "UTC") -> dict:
         return build_usage(conn, tz)
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------------------------
+# Provider-native fetchers for the cards Hermes core cannot answer
+# ---------------------------------------------------------------------------------------------
+
+_AG_CRED_TARGET = "gemini:antigravity"
+_AG_UA = "antigravity/2.8.0 windows/amd64"
+_AG_QUOTA_URL = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+_GROK_GRPC_URL = "https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig"
+_GROK_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36")
+
+# bucketId -> (window id, label). Google matches buckets by id, never by array position.
+_AG_BUCKETS = {
+    "gemini-5h": ("gemini_5h", "5h"),
+    "gemini-weekly": ("gemini_week", "Week"),
+    "3p-5h": ("3p_5h", "5h"),
+    "3p-weekly": ("3p_week", "Week"),
+}
+
+
+def _anthropic_core_token() -> bool:
+    """True when core can resolve a Claude token, i.e. its account-usage route can answer.
+
+    Hermes's credential pool does not list Anthropic when the sign-in lives in the Claude CLI
+    store, yet ``fetch_account_usage("anthropic")`` reads it fine. Gating on the pool alone
+    filed a card core could fill under Hidden/Inactive.
+    """
+    try:
+        from agent.anthropic_credentials import resolve_anthropic_token
+
+        return bool((resolve_anthropic_token() or "").strip())
+    except Exception:
+        return False
+
+
+def _windows_cred_blob(target: str) -> Optional[bytes]:
+    """Generic-credential blob from Windows Credential Manager, or None. Never raises."""
+    import sys
+
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    from ctypes import wintypes as wt
+
+    class _Attr(ctypes.Structure):
+        _fields_ = [("Keyword", wt.LPWSTR), ("Flags", wt.DWORD),
+                    ("ValueSize", wt.DWORD), ("Value", ctypes.POINTER(ctypes.c_byte))]
+
+    class _Cred(ctypes.Structure):
+        # FILETIME is two DWORDs: a 64-bit field here shifts every later member and the
+        # CredFree call then corrupts the heap.
+        _fields_ = [("Flags", wt.DWORD), ("Type", wt.DWORD),
+                    ("TargetName", wt.LPWSTR), ("Comment", wt.LPWSTR),
+                    ("LastWritten", wt.FILETIME), ("CredentialBlobSize", wt.DWORD),
+                    ("CredentialBlob", ctypes.POINTER(ctypes.c_ubyte)),
+                    ("Persist", wt.DWORD), ("AttributeCount", wt.DWORD),
+                    ("Attributes", ctypes.POINTER(_Attr)),
+                    ("TargetAlias", wt.LPWSTR), ("UserName", wt.LPWSTR)]
+
+    advapi = ctypes.windll.advapi32  # type: ignore[attr-defined]
+    out = ctypes.POINTER(_Cred)()
+    try:
+        if not advapi.CredReadW(target, 1, 0, ctypes.byref(out)):  # CRED_TYPE_GENERIC
+            return None
+        try:
+            cred = out.contents
+            if cred.CredentialBlobSize <= 0 or not cred.CredentialBlob:
+                return None
+            return bytes(bytearray(cred.CredentialBlob[: cred.CredentialBlobSize]))
+        finally:
+            advapi.CredFree(out)
+    except Exception:
+        return None
+
+
+def _antigravity_token() -> Optional[str]:
+    """The Antigravity session token its own app keeps on this machine (read-only)."""
+    blob = _windows_cred_blob(_AG_CRED_TARGET)
+    if not blob:
+        return None
+    import base64
+    import json
+
+    if blob.startswith(b"go-keyring-base64:"):
+        try:
+            blob = base64.b64decode(blob[len(b"go-keyring-base64:"):])
+        except Exception:
+            pass
+    try:
+        data = json.loads(blob.decode("utf-8"))
+    except Exception:
+        return None
+    # agy/antigravity-cli store the token as a nested object on Windows and macOS
+    # ({"token": {"access_token": ...}}); a bare string elsewhere.
+    token = data.get("token") if isinstance(data, dict) else None
+    if isinstance(token, dict):
+        token = token.get("access_token")
+    return token.strip() if isinstance(token, str) and token.strip() else None
+
+
+def _antigravity_quota() -> Optional[dict]:
+    """Antigravity's own quota summary (Google cloudcode) with its session token.
+
+    ``remainingFraction`` is 0..1 and *remaining*, so used = (1 - f) * 100 — never a
+    fabricated denominator. A bucket carrying a reset time but no fraction is an exhausted
+    counter, so it renders 100% used instead of being dropped.
+    """
+    token = _antigravity_token()
+    if not token:
+        return None
+    import json
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(
+        _AG_QUOTA_URL,
+        data=b"{}",
+        headers={"Authorization": f"Bearer {token}", "User-Agent": _AG_UA,
+                 "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            payload = json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            return _unavailable(
+                "antigravity",
+                "Antigravity's stored session has expired. Open Antigravity (or run `agy login`) "
+                "so it mints a fresh token, then press \u21bb.",
+            )
+        return _unavailable("antigravity", f"Antigravity quota request failed (HTTP {exc.code}).")
+    except Exception:
+        return _unavailable("antigravity", "Antigravity quota request failed.")
+    windows = []
+    for group in payload.get("groups") or ():
+        for bucket in (group or {}).get("buckets") or ():
+            spec = _AG_BUCKETS.get(str((bucket or {}).get("bucketId") or ""))
+            if not spec:
+                continue
+            fraction = bucket.get("remainingFraction")
+            try:
+                used = (1.0 - float(fraction)) * 100.0 if fraction is not None else 100.0
+            except (TypeError, ValueError):
+                used = 100.0
+            windows.append(_window(spec[0], spec[1], used, bucket.get("resetTime")))
+    if not windows:
+        return None
+    return _result("antigravity", windows=windows, source="antigravity_quota")
+
+
+def _xai_oauth_token() -> Optional[str]:
+    """Hermes's xAI OAuth access token, read from its own store (never refreshed here)."""
+    import json
+
+    try:
+        path = Path(_hermes_home()) / "auth.json"
+    except Exception:
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    state = ((data.get("providers") or {}).get("xai-oauth") or {})
+    token = (state.get("tokens") or {}).get("access_token")
+    if isinstance(token, str) and token.strip():
+        return token.strip()
+    for entry in (data.get("credential_pool") or {}).get("xai-oauth") or ():
+        token = (entry or {}).get("access_token")
+        if isinstance(token, str) and token.strip():
+            return token.strip()
+    return None
+
+
+def _grok_credits() -> Optional[dict]:
+    """Grok's own billing config (gRPC-web) as an OAuth sign-in can read it.
+
+    grok.com refuses OAuth tokens on ``/rest/rate-limits`` ("Action cannot be performed by
+    OAuth2 token users"), so the credits config is the only read a Hermes sign-in can make.
+    It reports a credit grant and its period, not percentage windows, so the card carries
+    details instead of bars it cannot back.
+    """
+    token = _xai_oauth_token()
+    if not token:
+        return None
+    import struct
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(
+        _GROK_GRPC_URL,
+        data=b"\x00\x00\x00\x00\x00",
+        headers={"Authorization": f"Bearer {token}", "User-Agent": _GROK_UA,
+                 "content-type": "application/grpc-web+proto", "x-grpc-web": "1",
+                 "x-user-agent": "connect-es/2.1.1", "origin": "https://grok.com",
+                 "referer": "https://grok.com/?_s=usage", "accept": "*/*"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read()
+    except Exception:
+        return None
+    body = raw
+    if body[:1] == b"\x00" and len(body) >= 5:
+        size = int.from_bytes(body[1:5], "big")
+        if size and len(body) >= 5 + size:
+            body = body[5:5 + size]
+
+    def _varint(buf: bytes, i: int) -> tuple[int, int]:
+        value = shift = 0
+        while i < len(buf):
+            byte = buf[i]
+            i += 1
+            value |= (byte & 0x7F) << shift
+            shift += 7
+            if not byte & 0x80:
+                break
+        return value, i
+
+    def _fields(buf: bytes) -> dict:
+        out: dict[int, list] = {}
+        i = 0
+        while i < len(buf):
+            key, i = _varint(buf, i)
+            field, wire = key >> 3, key & 7
+            if wire == 0:
+                value, i = _varint(buf, i)
+                out.setdefault(field, []).append(value)
+            elif wire == 1:
+                i += 8
+            elif wire == 5:
+                out.setdefault(field, []).append(struct.unpack("<f", buf[i:i + 4])[0])
+                i += 4
+            elif wire == 2:
+                size, i = _varint(buf, i)
+                out.setdefault(field, []).append(buf[i:i + size])
+                i += size
+            else:
+                break
+        return out
+
+    top = _fields(body)
+    inner = (top.get(1) or [b""])[0]
+    node = _fields(inner) if isinstance(inner, bytes) else {}
+    period: dict[str, int] = {}
+    for field, key in ((4, "start"), (5, "end")):
+        sub = (node.get(field) or [b""])[0]
+        if isinstance(sub, bytes) and sub:
+            stamps = _fields(sub).get(1) or []
+            if stamps and isinstance(stamps[0], int):
+                period[key] = stamps[0]
+    details = []
+    if period.get("start"):
+        details.append("Period start: " + datetime.fromtimestamp(
+            period["start"], tz=timezone.utc).strftime("%b %d %H:%M UTC"))
+    if period.get("end"):
+        details.append("Period end: " + datetime.fromtimestamp(
+            period["end"], tz=timezone.utc).strftime("%b %d %H:%M UTC"))
+    details.append("Grok reports a credits period, not usage percentages, to OAuth sign-ins.")
+    if not (period.get("start") or period.get("end")):
+        return None
+    return _result("xai", windows=[], source="grok_credits", details=details)
