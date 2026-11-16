@@ -1,6 +1,16 @@
 name: quota-gauge
 version: "0.2.1"
 description: "Desktop pane with draining quota bars for the AI subscriptions this profile is signed in to (Anthropic, ChatGPT/Codex, Command Code, xAI, OpenCode Go, GitHub Copilot, Nous Portal, Z.ai, Kimi Code, MiniMax, Devin, Antigravity), with the rest filed under Hidden/Inactive, plus daily token charts (input, output, cache read, cache write) built from every profile's usage records, merged into one account-wide ledger. No telemetry."
+disclosure: >
+  Reads only the sign-ins Hermes already holds, and only over the network to the vendor that
+  issued each one: Anthropic's OAuth usage endpoint (and, for a `claude setup-token` that carries
+  the inference scope only, one zero-token Haiku request whose `anthropic-ratelimit-unified-*`
+  headers carry the same numbers claude.ai shows), xAI's Grok billing config at grok.com with the
+  xai-oauth token, and Google's cloudcode quota summary with the Antigravity session token. That
+  Antigravity token is read read-only from Windows Credential Manager (`gemini:antigravity`), the
+  macOS Keychain, or agy's token file, and is refreshed in memory only; nothing is written back to
+  another app's credential store. Tokens and paths are never logged, sent anywhere else, or written
+  into the usage ledger. No telemetry, no analytics, no self-update.
 author: cynricantao
 license: MIT
 homepage: https://github.com/cynricantao/hermes-quota-gauge

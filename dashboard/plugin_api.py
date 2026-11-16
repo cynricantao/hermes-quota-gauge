@@ -294,47 +294,63 @@ def _pool_key(slug: str) -> tuple[Optional[str], Optional[str]]:
     return key, str(getattr(entry, "label", "") or "").strip() or None
 
 
-_bridge_cache: dict[str, Any] = {"mtime": None, "module": None}
-_bridge_lock = threading.Lock()
+_FALLBACK_FILES = ("provider_fallbacks.py", "local_bridge.py")
+_fallback_cache: dict[str, Any] = {"key": None, "modules": ()}
+_fallback_lock = threading.Lock()
 
 
-def _bridge():
-    """``dashboard/local_bridge.py`` (gitignored, personal) loaded on change, or None.
+def _fallback_modules():
+    """The provider modules beside this file, loaded on change.
 
-    It fills the providers Hermes has no public plugin route for yet (xAI, Antigravity,
-    spend-token Anthropic). The published plugin ships without it, so every call site treats a
-    missing bridge as "no extra provider", never as an error.
+    ``provider_fallbacks.py`` ships with the plugin: it fills the providers Hermes has no public
+    plugin route for yet (xAI's weekly window, Antigravity's quota, the spend-token Anthropic
+    fallback). ``local_bridge.py`` is a developer's own override, gitignored, and wins per
+    provider when present. Either may be missing: a call site treats that as "no extra provider",
+    never as an error.
     """
-    path = Path(__file__).with_name("local_bridge.py")
-    try:
-        mtime = path.stat().st_mtime
-    except OSError:
-        return None
-    with _bridge_lock:
-        if _bridge_cache["mtime"] == mtime:
-            return _bridge_cache["module"]
-        module = None
+    named = [(name, Path(__file__).with_name(name)) for name in _FALLBACK_FILES]
+    stamps = []
+    for name, path in named:
         try:
-            spec = importlib.util.spec_from_file_location("hermes_quota_gauge_local_bridge", path)
-            if spec and spec.loader:
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-        except Exception as exc:
-            log.warning("quota-gauge: local_bridge.py failed to load: %s", exc)
-            module = None
-        _bridge_cache.update(mtime=mtime, module=module)
-        return module
+            stamps.append((name, path.stat().st_mtime))
+        except OSError:
+            stamps.append((name, None))
+    key = tuple(stamps)
+    with _fallback_lock:
+        if _fallback_cache["key"] == key:
+            return _fallback_cache["modules"]
+        modules = []
+        for (name, path), (_, mtime) in zip(named, stamps):
+            if mtime is None:
+                continue
+            try:
+                spec = importlib.util.spec_from_file_location(f"hermes_quota_gauge_{path.stem}", path)
+                if spec and spec.loader:
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    modules.append(module)
+            except Exception as exc:  # a broken module must not take the routes down
+                log.warning("quota-gauge: %s failed to load: %s", name, exc)
+        _fallback_cache.update(key=key, modules=tuple(modules))
+        return _fallback_cache["modules"]
 
 
 def _bridge_quota(pid: str) -> Optional[dict]:
-    """``local_bridge.<pid>_quota()`` when the bridge defines it; None otherwise."""
-    bridge = _bridge()
-    fn = getattr(bridge, f"{pid}_quota", None) if bridge is not None else None
-    try:
-        return fn() if callable(fn) else None
-    except Exception as exc:
-        log.warning("quota-gauge: local_bridge.%s_quota failed: %s", pid, exc)
-        return None
+    """``<pid>_quota()`` from the fallback modules, a local override winning."""
+    for module in reversed(_fallback_modules()):
+        fn = getattr(module, f"{pid}_quota", None)
+        if not callable(fn):
+            continue
+        try:
+            result = fn()
+        except Exception as exc:
+            log.warning("quota-gauge: %s_quota failed: %s", pid, exc)
+            continue
+        if result:
+            return result
+    return None
+
+
 
 
 def detect(pid: str) -> Optional[str]:
